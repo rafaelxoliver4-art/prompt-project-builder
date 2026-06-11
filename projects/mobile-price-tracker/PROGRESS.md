@@ -1,7 +1,9 @@
 # PROGRESS — Mobile Price Tracker
 
 > The dated running log + status board. This is the **communication channel** between the Architect
-> and Code (via the Bridge). Newest entries on top. Every working cycle appends here.
+> and Code (via the Bridge). Every working cycle appends here (chronological, newest at the bottom).
+> **Standing rule (Bridge):** every CODE TASK ends by updating this file AND CONTEXT.md (durable
+> knowledge), committed + pushed — new sessions bootstrap exclusively from these files. See INSTRUCTIONS §2.1.
 
 ---
 
@@ -70,3 +72,8 @@ Legend: ✅ done · 🟡 in progress / partial · 🔌 not started · ⛔ blocke
 - `python -m mobile_tracker.main --demo` → `Wrote data\mobile_plans.xlsx: 12 plans in latest (2026-06-11), 3 snapshot(s), 5 change(s).` (Note: `python -m` needs `PYTHONPATH=src` — pyproject only wires `src/` for pytest; consider `pip install -e .` or a runner script in a future task.)
 - Workbook verified in **real Excel (COM recalc)**: 4 sheets (`history`/`latest`/`changes`/`summary`); summary KPIs compute real values — vivo 4 plans min R$ 14.99 / avg R$ 92.25 / max R$ 150.00; claro 4 plans 59.99 / 83.74 / 119.99; tim 4 plans 30.00 / 74.99 / 139.99. No `"-"` fallbacks.
 - Demo-overwritten `data/mobile_plans.xlsx` restored via `git checkout --` (not committed, per task guardrail). **Offline pipeline verified on the real machine.**
+
+### 2026-06-11 — Bridge standing rule: two-files closing ritual (Code, on Bridge's instruction)
+- Rafael's rule, now codified: **every CODE TASK ends with BOTH PROGRESS.md (dated entry) and CONTEXT.md (durable knowledge) updated, committed, and pushed.** Rationale: new chat/Code sessions bootstrap exclusively from these files — anything not written here is lost.
+- Written into INSTRUCTIONS **v1.2.0** (§2.1 "Closing ritual" + changelog) and into both files' headers. CONTEXT bumped to **0.2.2**.
+- Also flagged by the Bridge: the prices in the workbook are **demo sample data, not real prices** (see CONTEXT §5 note); Bridge is raising it with the Architect. Real prices arrive with the live adapters (CODE TASK #3+).

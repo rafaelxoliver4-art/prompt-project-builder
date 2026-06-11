@@ -1,8 +1,11 @@
 # CONTEXT — Mobile Price Tracker
 
-> **Version:** 0.2.1 · **Last updated:** 2026-06-11 · Content decided by the Architect; written by Code.
+> **Version:** 0.2.2 · **Last updated:** 2026-06-11 · Content decided by the Architect; written by Code.
 > The *what / how / why* of this project and every decision behind it. This is the knowledge base and
 > IP. If someone read only this file, they should understand the project well enough to rebuild it.
+> **Standing rule (Bridge):** every CODE TASK ends by updating this file (durable knowledge) AND
+> PROGRESS.md (dated log), committed + pushed — new sessions bootstrap exclusively from these files.
+> See INSTRUCTIONS §2.1.
 
 ---
 
@@ -142,6 +145,7 @@ Nullable fields are expected to be sparse early — parsers improve over time. A
 4. **History horizon → keep ALL snapshots forever (default).** Rows are tiny; revisit roll-ups only if the file grows unwieldy.
 
 ## 11. Changelog
+- **0.2.2 — 2026-06-11** — Bridge standing rule added to the header: every CODE TASK ends by updating CONTEXT + PROGRESS, committed + pushed (new sessions bootstrap from these files). Mirrors INSTRUCTIONS v1.2.0 §2.1.
 - **0.2.1 — 2026-06-11** — Code added §5 "Verified execution environment" after CODE TASK #2: Windows 11 / Python 3.13.13 machine verified, `PYTHONPATH=src` run quirk + `pip install -e .` TODO, demo-data-is-not-real-prices clarification, pending `workflow`-scope auth for the Actions file.
 - **0.2.0 — 2026-06-11** — Bridge resolved all four open questions (§10): interim function-sheets with per-carrier + dashboard layout deferred to backlog; **full-detail** capture (expand modals → Playwright-favored); **rclone-in-Actions** chosen for the Drive mirror; keep all history. Recorded interaction/runtime implications in §8.
 - **0.1.0 — 2026-06-11** — Project defined; reconnaissance on all three carrier stacks; architecture, schema, Excel layout, decisions, risks, and glossary recorded.
