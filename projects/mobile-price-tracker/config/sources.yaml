@@ -1,0 +1,90 @@
+# Mobile Price Tracker — sources of truth.
+# Edit THIS file to add states, carriers, categories, or change the schedule.
+# Code reads this; nothing about URLs/states/schedule should be hardcoded in Python.
+
+project:
+  name: mobile-price-tracker
+  currency: BRL
+  timezone: America/Sao_Paulo
+  # End of day in Brazil (~23:00 BRT) == 02:00 UTC. GitHub Actions cron uses UTC.
+  schedule_cron_utc: "0 2 * * *"
+  output_xlsx: data/mobile_plans.xlsx
+  raw_capture_dir: data/raw   # saved HTML/JSON per run, for audit & re-parsing
+
+# Politeness / anti-fragility knobs (see GOVERNANCE §3).
+scraping:
+  runs_per_day: 1
+  min_delay_seconds: 2
+  max_delay_seconds: 6
+  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+  request_timeout_seconds: 30
+  headless: true
+
+# Geography. SP only is active now; others are pre-listed but inactive.
+states:
+  - code: SP
+    name: São Paulo
+    active: true
+  - code: RJ
+    name: Rio de Janeiro
+    active: false
+  - code: MG
+    name: Minas Gerais
+    active: false
+
+# Carriers, their render strategy (from recon — see CONTEXT §3), and the pages per category.
+# `state_in_url`: TIM puts the state in the path, so {state} is templated; Vivo/Claro use geolocation.
+carriers:
+  vivo:
+    display_name: Vivo
+    render: aem            # try AEM .model.json first, else playwright
+    state_in_url: false
+    base: https://vivo.com.br
+    categories:
+      postpaid:
+        label: Pós-pago
+        url: https://vivo.com.br/para-voce/produtos-e-servicos/para-o-celular/planos-pos-pago
+      control:
+        label: Controle
+        url: https://vivo.com.br/para-voce/produtos-e-servicos/para-o-celular/planos-controle
+      lite:
+        label: Vivo Easy/Lite
+        url: https://vivo.com.br/para-voce/produtos-e-servicos/para-o-celular/easy-lite
+      prepaid:
+        label: Pré-pago
+        url: https://vivo.com.br/para-voce/produtos-e-servicos/para-o-celular/pre-pago/vivo-pre
+
+  claro:
+    display_name: Claro
+    render: nextjs         # parse __NEXT_DATA__ JSON first, else playwright
+    state_in_url: false
+    base: https://www.claro.com.br
+    categories:
+      postpaid:
+        label: Pós
+        url: https://www.claro.com.br/celular/pos
+      control:
+        label: Controle
+        url: https://www.claro.com.br/celular/controle
+      flex:
+        label: Flex
+        url: https://www.claro.com.br/celular/flex
+      prepaid:
+        label: Prezão (Pré)
+        url: https://www.claro.com.br/celular/planos-pre/prezao
+
+  tim:
+    display_name: TIM
+    render: html           # server-rendered Drupal; watch for SVG-embedded prices
+    state_in_url: true     # {state} lowercased goes into the path
+    base: https://www.tim.com.br
+    categories:
+      prepaid:
+        label: Pré-pago
+        url: https://www.tim.com.br/{state}/para-voce/planos/pre-pago
+      control:
+        label: Controle
+        url: https://www.tim.com.br/{state}/para-voce/planos/controle
+      postpaid:
+        label: Pós (TIM Black)
+        url: https://www.tim.com.br/{state}/para-voce/planos/pos-pago/tim-black

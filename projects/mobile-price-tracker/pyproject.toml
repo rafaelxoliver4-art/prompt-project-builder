@@ -1,0 +1,16 @@
+[project]
+name = "mobile-price-tracker"
+version = "0.1.0"
+description = "Daily tracker of Brazilian mobile plan prices (Vivo / Claro / TIM)."
+requires-python = ">=3.11"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

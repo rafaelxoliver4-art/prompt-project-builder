@@ -1,0 +1,26 @@
+# Secrets — never commit (GOVERNANCE §2)
+.env
+*.key
+rclone.conf
+*.secret
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# Playwright browser profiles / downloads
+.cache/
+ms-playwright/
+
+# Local raw captures (kept locally for debugging; not committed)
+projects/*/data/raw/
+
+# OS
+.DS_Store
+Thumbs.db
