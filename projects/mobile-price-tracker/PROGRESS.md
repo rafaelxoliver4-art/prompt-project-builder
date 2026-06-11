@@ -63,3 +63,10 @@ Legend: ✅ done · 🟡 in progress / partial · 🔌 not started · ⛔ blocke
 - Repo initialized and pushed: **https://github.com/rafaelxoliver4-art/prompt-project-builder** (private, branch `main`, root commit `463c0d3`). INSTRUCTIONS → **v1.1.0** (Code-writes-all-files role split; §6 "Where work is saved" added). Offline pipeline verified earlier by the Architect — 6 tests passing.
 - **Caveat for the Actions wiring task:** `.github/workflows/mobile-price-tracker.yml` is **excluded from the push** (still on disk, untracked). The machine's `gh` OAuth token lacks the `workflow` scope, and GitHub rejects any push that adds a workflow file without it. Before wiring CI: run `gh auth refresh -h github.com -s workflow` (Bridge completes the device-code + email verification on github.com), then commit and push the workflow file.
 - Repo-local git identity set (`rafaelxoliver4-art` / `rafaelxoliver4@gmail.com`); no global config touched. Verified no secrets staged (`.env`/`*.key`/`rclone.conf` excluded by `.gitignore`).
+
+### 2026-06-11 — CODE TASK #2 done: offline pipeline verified on the real machine (Code)
+- Environment: **Windows 11 Pro (10.0.26200), Python 3.13.13**, venv at `.venv/`, all `requirements.txt` deps installed, Playwright **Chromium installed** (ready for live tasks).
+- `python -m pytest -q` → **6 passed** (17.50s).
+- `python -m mobile_tracker.main --demo` → `Wrote data\mobile_plans.xlsx: 12 plans in latest (2026-06-11), 3 snapshot(s), 5 change(s).` (Note: `python -m` needs `PYTHONPATH=src` — pyproject only wires `src/` for pytest; consider `pip install -e .` or a runner script in a future task.)
+- Workbook verified in **real Excel (COM recalc)**: 4 sheets (`history`/`latest`/`changes`/`summary`); summary KPIs compute real values — vivo 4 plans min R$ 14.99 / avg R$ 92.25 / max R$ 150.00; claro 4 plans 59.99 / 83.74 / 119.99; tim 4 plans 30.00 / 74.99 / 139.99. No `"-"` fallbacks.
+- Demo-overwritten `data/mobile_plans.xlsx` restored via `git checkout --` (not committed, per task guardrail). **Offline pipeline verified on the real machine.**
