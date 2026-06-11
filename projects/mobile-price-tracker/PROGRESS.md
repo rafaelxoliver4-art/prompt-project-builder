@@ -17,7 +17,7 @@
 | Adapters (vivo/claro/tim) | 🟡 stubs | Interfaces + documented strategy; **selectors/parsing TBD by Code on live sites.** |
 | Live scraping | 🔌 not started | Needs Code on a real machine (sandbox can't reach the sites). |
 | Scheduling (GitHub Actions) | 🟡 drafted | Workflow file present; needs repo + secrets + first run. |
-| GitHub + Drive backup | 🔌 not started | Pending Bridge decisions (CONTEXT §10 Q2). |
+| GitHub + Drive backup | 🟡 partial | GitHub repo live (private, pushed by Code). Drive mirror not started. |
 
 Legend: ✅ done · 🟡 in progress / partial · 🔌 not started · ⛔ blocked
 
@@ -58,3 +58,8 @@ Legend: ✅ done · 🟡 in progress / partial · 🔌 not started · ⛔ blocke
   4. **History:** keep all snapshots forever.
 - `pytest` still **6 passed**; edited adapters parse clean.
 - Unchanged: CODE TASK #1 (init repo) and #2 (offline verify) are unaffected by these choices and ready to run now. The decisions shape CODE TASK #3+ (live adapters) and the later Actions/Drive wiring.
+
+### 2026-06-11 — CODE TASK #1 done: repo initialized and pushed (Code)
+- Repo initialized and pushed: **https://github.com/rafaelxoliver4-art/prompt-project-builder** (private, branch `main`, root commit `463c0d3`). INSTRUCTIONS → **v1.1.0** (Code-writes-all-files role split; §6 "Where work is saved" added). Offline pipeline verified earlier by the Architect — 6 tests passing.
+- **Caveat for the Actions wiring task:** `.github/workflows/mobile-price-tracker.yml` is **excluded from the push** (still on disk, untracked). The machine's `gh` OAuth token lacks the `workflow` scope, and GitHub rejects any push that adds a workflow file without it. Before wiring CI: run `gh auth refresh -h github.com -s workflow` (Bridge completes the device-code + email verification on github.com), then commit and push the workflow file.
+- Repo-local git identity set (`rafaelxoliver4-art` / `rafaelxoliver4@gmail.com`); no global config touched. Verified no secrets staged (`.env`/`*.key`/`rclone.conf` excluded by `.gitignore`).
