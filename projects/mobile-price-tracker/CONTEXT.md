@@ -1,6 +1,6 @@
 # CONTEXT — Mobile Price Tracker
 
-> **Version:** 0.2.3 · **Last updated:** 2026-06-11 · Content decided by the Architect; written by Code.
+> **Version:** 0.2.4 · **Last updated:** 2026-06-17 · Content decided by the Architect; written by Code.
 > The *what / how / why* of this project and every decision behind it. This is the knowledge base and
 > IP. If someone read only this file, they should understand the project well enough to rebuild it.
 > **Standing rule (Bridge):** every CODE TASK ends by updating this file (durable knowledge) AND
@@ -90,6 +90,14 @@ Python 3.11+ · `playwright` (headless Chromium, JS rendering) · `httpx` (fast 
 - **Demo data ≠ real prices.** `--demo` seeds hardcoded sample plans (only the Vivo *60GB/R$150* figure came from real recon). Real prices arrive only with the live adapters (CODE TASK #3+).
 - **Pending one-time auth:** the machine's `gh` token lacks the `workflow` scope, so `.github/workflows/mobile-price-tracker.yml` is untracked locally (pushes containing it are rejected). Before the Actions wiring task: `gh auth refresh -h github.com -s workflow` + Bridge completes the device-code/email check, then commit the workflow file.
 
+#### Second machine verified (2026-06-17, CODE TASK #2.5)
+
+- **Machine:** Windows 11 **Home** Single Language (10.0.26200), Python **3.12.10**, user `rafae`. The project transferred here via **OneDrive sync** (not a fresh `git clone`), so the working copy already includes both `.git` history **and** the untracked `.github/` workflow file.
+- **Git verified:** local `HEAD == origin/main == 0f557e4`; `git diff origin/main` shows **no differences** (tracked tree byte-identical to GitHub); ahead/behind `0 0`; only untracked item is `.github/`. The OneDrive-synced workflow file is **byte-identical (SHA256)** to the copy in the sibling `...\Área de Trabalho\CFA\prompt-project-builder\` folder. Workflow file state: **already present (no restore needed).**
+- **Minor:** `git fsck` reports one stale reflog entry + dangling objects — harmless residue from OneDrive copying `.git` mid-operation; committed history is intact (clean diff proves it). Optional cleanup: `git reflog expire --expire=now --all; git gc`.
+- **⛔ Env NOT rebuilt on this machine yet — network blocker.** The stale OneDrive-synced `.venv` (Python 3.13 from machine #1) was removed; a fresh `python -m venv .venv` (Python 3.12.10) was created, but **`pip install` cannot reach PyPI.** Root cause: an active **McAfee VPN** interface (MTU 1420, InterfaceMetric 5 = prioritized) is an **MTU/PMTUD black hole** — `ping -f -l 1472` to a Fastly IP returns *"Packet needs to be fragmented but DF set"* while a 500-byte ping replies fine. General sites (example.com, github.com) work; Fastly-fronted hosts (pypi.org, files.pythonhosted.org, raw.githubusercontent.com — all `151.101.x.x`) time out on the large TLS response. **Fix (Bridge):** disconnect the McAfee VPN, or clamp the interface MTU, then re-run venv install + `playwright install chromium`. `git`/GitHub are unaffected (github.com is reachable). **pytest + `--demo` smoke test deferred** until deps install.
+- **Decision (Bridge, 2026-06-17):** since git verification confirms this copy is identical to GitHub, **continue the project from this machine**; the offline smoke-test re-verification is deferred to whenever the network is sorted (it already passed on machine #1).
+
 ### Backups & machine transfer (2026-06-11)
 
 Three copies of the project exist; **GitHub is the source of truth**, the other two are backups:
@@ -97,8 +105,8 @@ Three copies of the project exist; **GitHub is the source of truth**, the other 
 | Location | Path / URL | Contents | Notes |
 |----------|-----------|----------|-------|
 | **GitHub** (source of truth) | `https://github.com/rafaelxoliver4-art/prompt-project-builder` | Everything **except** `.github/workflows/*` | The workflow file is **not** pushed (workflow-scope auth still pending — see above). A fresh `git clone` will be missing it. |
-| **Google Drive** (mirror) | `G:\Meu Drive\prompt-project-builder` (account `rafaelxoliver4@gmail.com`) | Full repo **including `.git` history AND the `.github/` workflow file**, minus `.venv`/caches | Made via `robocopy /E /XD .venv __pycache__ .pytest_cache`. Refreshed whenever docs change. This is the only copy that has the workflow file in cloud storage. |
-| **OneDrive** (working copy) | `C:\Users\Rafael\OneDrive\Área de Trabalho\prompt-project-builder` | Live working tree (this machine) | Includes `.venv` (regenerable). |
+| **Google Drive** (mirror) | `G:\Meu Drive\prompt-project-builder` (account `rafaelxoliver4@gmail.com`) | Full repo **including `.git` history AND the `.github/` workflow file**, minus `.venv`/caches | Made via `robocopy /E /XD .venv __pycache__ .pytest_cache`. Refreshed whenever docs change. This is the only copy that has the workflow file in cloud storage. **⚠️ Not locally verifiable from machine #2** — Google Drive Desktop is **not installed** there (no `DriveFS`, no mounted drive letter), so the cloud mirror could not be inspected on 2026-06-17; it presumably remains intact in the cloud, untouched by the transfer. |
+| **OneDrive** (working copy, machine #2) | `C:\Users\rafae\OneDrive\Área de Trabalho\prompt-project-builder` | Live working tree — synced to machine #2; includes `.git` + the `.github/` workflow file | Verified identical to GitHub on 2026-06-17 (see "Second machine verified" above). A separate manual copy also exists at `...\Área de Trabalho\CFA\prompt-project-builder` (no `.git`; identical workflow file). |
 
 **Bootstrapping on a new machine:**
 1. `git clone https://github.com/rafaelxoliver4-art/prompt-project-builder` (gets everything that's pushed).
@@ -161,6 +169,7 @@ Nullable fields are expected to be sparse early — parsers improve over time. A
 4. **History horizon → keep ALL snapshots forever (default).** Rows are tiny; revisit roll-ups only if the file grows unwieldy.
 
 ## 11. Changelog
+- **0.2.4 — 2026-06-17** — CODE TASK #2.5 (transfer verification on machine #2). Added §5 "Second machine verified": Windows 11 Home / Python 3.12.10, git verified identical to GitHub (`0f557e4`, clean diff), workflow file already present via OneDrive sync. Recorded the **McAfee VPN MTU black-hole** blocking PyPI (env rebuild + smoke test deferred), the Google-Drive-not-installed-here caveat, and the Bridge decision to continue from this machine.
 - **0.2.3 — 2026-06-11** — Added §5 "Backups & machine transfer": three-copy map (GitHub = source of truth; Google Drive `G:\Meu Drive\prompt-project-builder` = full mirror incl. `.git` + the unpushed `.github/` workflow; OneDrive = working copy) and a 4-step new-machine bootstrap. Prompted by Rafael transferring to another computer.
 - **0.2.2 — 2026-06-11** — Bridge standing rule added to the header: every CODE TASK ends by updating CONTEXT + PROGRESS, committed + pushed (new sessions bootstrap from these files). Mirrors INSTRUCTIONS v1.2.0 §2.1.
 - **0.2.1 — 2026-06-11** — Code added §5 "Verified execution environment" after CODE TASK #2: Windows 11 / Python 3.13.13 machine verified, `PYTHONPATH=src` run quirk + `pip install -e .` TODO, demo-data-is-not-real-prices clarification, pending `workflow`-scope auth for the Actions file.
