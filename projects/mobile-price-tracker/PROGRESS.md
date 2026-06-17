@@ -77,3 +77,10 @@ Legend: ✅ done · 🟡 in progress / partial · 🔌 not started · ⛔ blocke
 - Rafael's rule, now codified: **every CODE TASK ends with BOTH PROGRESS.md (dated entry) and CONTEXT.md (durable knowledge) updated, committed, and pushed.** Rationale: new chat/Code sessions bootstrap exclusively from these files — anything not written here is lost.
 - Written into INSTRUCTIONS **v1.2.0** (§2.1 "Closing ritual" + changelog) and into both files' headers. CONTEXT bumped to **0.2.2**.
 - Also flagged by the Bridge: the prices in the workbook are **demo sample data, not real prices** (see CONTEXT §5 note); Bridge is raising it with the Architect. Real prices arrive with the live adapters (CODE TASK #3+).
+
+### 2026-06-11 — Backup to Google Drive + machine transfer prep (Code)
+- Bridge is moving to another computer; asked to ensure everything is saved to GitHub **and** Google Drive.
+- **GitHub:** verified fully pushed — working tree clean, `origin/main` at `0587ba9` (only untracked item is `.github/`, the workflow file that can't be pushed yet — workflow-scope auth pending).
+- **Google Drive:** copied the full project to **`G:\Meu Drive\prompt-project-builder`** (account `rafaelxoliver4@gmail.com`, Drive Desktop running) via `robocopy /E` excluding `.venv`/`__pycache__`/`.pytest_cache`. The Drive copy **includes `.git` history AND `.github/workflows/mobile-price-tracker.yml`** — so it is the only cloud copy that has the workflow file. ~0.2 MB; all key files verified present.
+- Recorded the three-copy map + new-machine bootstrap steps in **CONTEXT §5** (v0.2.3). Key gotcha for the new machine: a fresh `git clone` will be **missing the `.github/` workflow file** — restore it from the Drive backup.
+- ⚠️ Drive Desktop syncs the local `G:\Meu Drive` folder to the cloud in the background; allow a moment for upload to finish before powering down this machine.
