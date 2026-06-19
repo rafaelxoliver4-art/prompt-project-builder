@@ -1,6 +1,6 @@
 # CONTEXT — Mobile Price Tracker
 
-> **Version:** 0.2.5 · **Last updated:** 2026-06-17 · Content decided by the Architect; written by Code.
+> **Version:** 0.2.6 · **Last updated:** 2026-06-19 · Content decided by the Architect; written by Code.
 > The *what / how / why* of this project and every decision behind it. This is the knowledge base and
 > IP. If someone read only this file, they should understand the project well enough to rebuild it.
 > **Standing rule (Bridge):** every CODE TASK ends by updating this file (durable knowledge) AND
@@ -90,7 +90,13 @@ Python 3.11+ · `playwright` (headless Chromium, JS rendering) · `httpx` (fast 
 - **Demo data ≠ real prices.** `--demo` seeds hardcoded sample plans (only the Vivo *60GB/R$150* figure came from real recon). Real prices arrive only with the live adapters (CODE TASK #3+).
 - **Pending one-time auth:** the machine's `gh` token lacks the `workflow` scope, so `.github/workflows/mobile-price-tracker.yml` is untracked locally (pushes containing it are rejected). Before the Actions wiring task: `gh auth refresh -h github.com -s workflow` + Bridge completes the device-code/email check, then commit the workflow file.
 
-#### Second machine verified (2026-06-17, CODE TASK #2.5)
+#### Current working environment (2026-06-19) — consolidated to ONE machine
+
+- **Bridge clarification (2026-06-19):** there is only **one** working machine — **this** one (user `Rafael`, Windows 11 Pro, **Python 3.13.14**). The machine-#1/#2 "transfer" track is set aside; the two subsections below are kept as **historical record**, not current state. A future PC migration (when Rafael changes computers) will go through GitHub (`git clone`) per the "Backups & machine transfer" bootstrap steps — not folder sync.
+- **Env rebuilt + offline smoke test GREEN here, in place (the deferred #2.7 work):** removed the foreign OneDrive-synced `.venv` (the `rafae`/Python-3.12.10 one), created a fresh venv on **Python 3.13.14**, `pip install -r requirements.txt` **completed** (no PyPI/VPN blocker on this machine), `playwright install chromium` done. `pytest` → **6 passed**; `--demo` wrote the 4 sheets; summary KPIs real (vivo R$150 / claro R$64.99 / tim R$30.00). Demo workbook restored (not committed).
+- **OneDrive relocation: DEFERRED.** The repo still lives under OneDrive; with a single writer there is no `.git`-collision risk. Moving it out of cloud sync waits for the future PC change.
+
+#### Second machine verified (2026-06-17, CODE TASK #2.5) — historical (superseded by the single-machine consolidation above)
 
 - **Machine:** Windows 11 **Home** Single Language (10.0.26200), Python **3.12.10**, user `rafae`. The project transferred here via **OneDrive sync** (not a fresh `git clone`), so the working copy already includes both `.git` history **and** the untracked `.github/` workflow file.
 - **Git verified:** local `HEAD == origin/main == 0f557e4`; `git diff origin/main` shows **no differences** (tracked tree byte-identical to GitHub); ahead/behind `0 0`; only untracked item is `.github/`. The OneDrive-synced workflow file is **byte-identical (SHA256)** to the copy in the sibling `...\Área de Trabalho\CFA\prompt-project-builder\` folder. Workflow file state: **already present (no restore needed).**
@@ -171,6 +177,7 @@ Nullable fields are expected to be sparse early — parsers improve over time. A
 4. **History horizon → keep ALL snapshots forever (default).** Rows are tiny; revisit roll-ups only if the file grows unwieldy.
 
 ## 11. Changelog
+- **0.2.6 — 2026-06-19** — Bridge clarified there is only ONE working machine (this one — `Rafael`, Python 3.13.14). Added §5 "Current working environment": the deferred env rebuild was completed here in place (foreign 3.12.10 venv removed, fresh 3.13.14 venv, `pip install` completed, **6 tests pass**, `--demo` KPIs real); OneDrive relocation deferred to the future PC change. Marked the "Second machine verified" + machine-#1/#2 sections as historical.
 - **0.2.5 — 2026-06-17** — Cross-checked the transfer with the still-running machine #1 Code instance (via Bridge). Confirmed in §5: Drive mirror **intact** (robocopy finished, workflow file present); **no local-only/gitignored files needed** (no `.env`/`rclone.conf`/credentials); `gh` workflow-scope auth **still pending and per-machine**. Recorded two new items: the **`.git`-inside-cloud-sync hazard** (both machines syncing the same OneDrive `.git` → corruption/divergence risk; sync via GitHub, not OneDrive) and the **CI workflow `PYTHONPATH=src` bug** ("Run tracker" step will `ModuleNotFoundError` on first Actions run).
 - **0.2.4 — 2026-06-17** — CODE TASK #2.5 (transfer verification on machine #2). Added §5 "Second machine verified": Windows 11 Home / Python 3.12.10, git verified identical to GitHub (`0f557e4`, clean diff), workflow file already present via OneDrive sync. Recorded the **McAfee VPN MTU black-hole** blocking PyPI (env rebuild + smoke test deferred), the Google-Drive-not-installed-here caveat, and the Bridge decision to continue from this machine.
 - **0.2.3 — 2026-06-11** — Added §5 "Backups & machine transfer": three-copy map (GitHub = source of truth; Google Drive `G:\Meu Drive\prompt-project-builder` = full mirror incl. `.git` + the unpushed `.github/` workflow; OneDrive = working copy) and a 4-step new-machine bootstrap. Prompted by Rafael transferring to another computer.
