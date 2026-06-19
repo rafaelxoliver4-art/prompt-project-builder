@@ -1,6 +1,6 @@
 # CONTEXT — Mobile Price Tracker
 
-> **Version:** 0.2.8 · **Last updated:** 2026-06-19 · Content decided by the Architect; written by Code.
+> **Version:** 0.2.9 · **Last updated:** 2026-06-19 · Content decided by the Architect; written by Code.
 > The *what / how / why* of this project and every decision behind it. This is the knowledge base and
 > IP. If someone read only this file, they should understand the project well enough to rebuild it.
 > **Standing rule (Bridge):** every CODE TASK ends by updating this file (durable knowledge) AND
@@ -68,6 +68,17 @@ Plan grid = the `.unique-card` component (works on **all four** category pages).
 - **bundle** (Netflix/Disney+/Globoplay/Spotify/Premiere…) is in the name + `.unique-card__features-cobranded-title` → mapped to `streaming` / `extra_benefits`.
 
 **Per-category coverage (24 live SP plans):** postpaid 7, control 8, lite (Easy/Lite) 5, prepaid 4 — **all four work** with one selector set. A single page load suffices (no per-card "ver mais" clicking for the headline fields). Same naming-uniqueness caveat as Claro: several cards share a name at different prices (e.g. two "Vivo Controle", several "Easy Lite") → kept in history, collapsed in `latest`.
+
+### TIM — live structure verified (2026-06-19, CODE TASK #5) ← valuable IP
+
+Server-rendered Drupal (Acquia Site Studio). A plain `httpx` GET returns **200** (no anti-bot, no browser needed). The visible DOM is **noisy** — marketing components with per-instance UUID classes + device sales; **no clean plan-card class and no `<table>`**. The structured plan grid is embedded as JSON in `<script data-drupal-selector="drupal-settings-json" type="application/json">` → **`settings["ofertas"][]`** (one object per plan card). Per oferta:
+- **price** → `field_preco_card_oferta` (clean text value, e.g. "64,99")
+- **name** → `title` (e.g. "1 Card - TIM Controle Plus 45GB - [PROD]") → strip the `N Card -` prefix and the `[PROD]`/`[On Air …]` tags → "TIM Controle Plus 45GB"; `field_nome_da_oferta` is the bare-name fallback.
+- **data_gb** → parsed from the cleaned title.
+
+**SVG-embedded prices (the recon concern): RESOLVED — no OCR needed.** The hero banner price *is* in an SVG `alt` (control "45GB por R$64,99"; postpaid "Lê-se: a partir de 169 e 99"), but that's only the marketing headline. **Every per-plan price comes from the JSON text** (`field_preco_card_oferta`), so OCR is unnecessary. Body-text prices like "R$ 20,90 HBO Max" are **add-ons, not plans** — ignored.
+
+**Per-category coverage (15 live SP plans):** control 5, postpaid (TIM Black) 7, prepaid (TIM Pré XIP) 3 — **all three parse from the same JSON path**, no Playwright. Prepaid `field_preco_card_oferta` is the recarga amount (R$20/25/30). State is in the URL path (`/sp/…`, config-templated).
 
 ## 4. Architecture
 
@@ -194,6 +205,8 @@ Nullable fields are expected to be sparse early — parsers improve over time. A
 > - **Claro prepaid (Prezão)** parser — its page uses a non-`card_360` layout (§3); 0 plans today.
 > - **Plan-name uniqueness** — several carriers show multiple cards sharing a name at different prices (Claro "Controle 30GB" ×2; Vivo "Vivo Controle" ×2, "Easy Lite" ×N). `latest` (keyed by name) collapses them. Fix with a **stable `plan_id`** field — a **schema change that needs the Bridge's explicit YES** before implementing.
 
+> **Ideas / parking lot (not yet scheduled):** **Comparison methodology** (Bridge, 2026-06-19) for the future cross-operator "comparable plans" view — compare **like-for-like WITHIN each category** (pure postpaid, control/hybrid, prepaid, digital = Vivo Lite / Claro Flex), aligned **by price rank**: sort each carrier's plans in a category ascending by price, then align across carriers by rank (cheapest-vs-cheapest, 2nd-vs-2nd, …). Parked idea, not scheduled — revisit when the per-operator / comparison sheets are built.
+
 ## 8. Known challenges / risks
 
 - **JS rendering & anti-bot.** Modern telecom SPAs may rate-limit or block headless browsers; we stay polite (1×/day, delays, real UA) and treat blocks as limitations to discuss, never to defeat covertly (see GOVERNANCE §3).
@@ -214,6 +227,7 @@ Nullable fields are expected to be sparse early — parsers improve over time. A
 4. **History horizon → keep ALL snapshots forever (default).** Rows are tiny; revisit roll-ups only if the file grows unwieldy.
 
 ## 11. Changelog
+- **0.2.9 — 2026-06-19** — CODE TASK #5: TIM adapter (third/last stack — all three carriers now live). Added §3 "TIM — live structure verified": server-rendered Drupal, plain `httpx`; plans come from the embedded `drupal-settings-json` → `settings["ofertas"][]` (`field_preco_card_oferta` price + `title` name) — **SVG-price concern resolved, no OCR needed**; 15 live SP plans (control 5 / Black 7 / Pré 3), no Playwright. Parked the Bridge's cross-operator **comparison methodology** (within-category, by price rank) in §7.
 - **0.2.8 — 2026-06-19** — CODE TASK #4: Vivo adapter (second live carrier). Added §3 "Vivo — live structure verified": `httpx` 403 / `.model.json` 403 → **Playwright** + `.unique-card` DOM scrape (selectors documented); 24 live SP plans across all four categories (postpaid 7 / control 8 / lite 5 / prepaid 4). Extended the §7 BACKLOG with three deferred product items (per-operator + cross-operator comparison, promotions view, dashboard) under a "data correctness & coverage first" rule, and logged two open data-quality items (Claro-prepaid parser; plan-name uniqueness → stable `plan_id`, a schema change needing Bridge YES).
 - **0.2.7 — 2026-06-19** — CODE TASK #3: Claro adapter implemented (first live data). Added §3 "Claro — live structure verified": the `__NEXT_DATA__` → `card_360` JSON path, the two price formats (postpaid `R$ x`; control/flex bare value + struck-through `prefix` → regular/promo), slug-derived names, no-Playwright, and that prepaid uses a different (non-`card_360`) layout → deferred. 13 live SP plans (postpaid 5 / control 4 / flex 4). Editable install (`pip install -e .`) removes the `PYTHONPATH=src` quirk + the CI "Run tracker" bug.
 - **0.2.6 — 2026-06-19** — Bridge clarified there is only ONE working machine (this one — `Rafael`, Python 3.13.14). Added §5 "Current working environment": the deferred env rebuild was completed here in place (foreign 3.12.10 venv removed, fresh 3.13.14 venv, `pip install` completed, **6 tests pass**, `--demo` KPIs real); OneDrive relocation deferred to the future PC change. Marked the "Second machine verified" + machine-#1/#2 sections as historical.

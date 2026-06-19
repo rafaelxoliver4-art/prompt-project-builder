@@ -16,8 +16,8 @@
 | Reconnaissance | ✅ done | Stacks identified (TIM=Drupal, Claro=Next.js, Vivo=AEM). See CONTEXT §3. |
 | Data schema | ✅ done | `Plan` dataclass defined (CONTEXT §6). |
 | Excel writer | ✅ done (offline) | Works on fixture data; verified by demo run + unit test. |
-| Adapters (vivo/claro/tim) | 🟡 claro+vivo live; tim stub | **Claro** (`__NEXT_DATA__`) + **Vivo** (Playwright DOM) parse real SP plans. TIM still a stub. |
-| Live scraping | 🟡 partial | **Claro** (13) + **Vivo** (24) live SP plans, 2026-06-19. TIM + Claro-**prepaid** pending. |
+| Adapters (vivo/claro/tim) | ✅ all three live | **Claro** (`__NEXT_DATA__`), **Vivo** (Playwright DOM), **TIM** (Drupal `ofertas` JSON) parse real SP plans. |
+| Live scraping | 🟡 3 carriers live | **Claro** 13 + **Vivo** 24 + **TIM** 15 = **52** live SP plans, 2026-06-19. Claro-**prepaid** + `plan_id` pending. |
 | Scheduling (GitHub Actions) | 🟡 drafted | Workflow file present; needs repo + secrets + first run. |
 | GitHub + Drive backup | 🟡 partial | GitHub repo live (private, pushed by Code). Drive mirror not started. |
 
@@ -136,3 +136,17 @@ Machine #2 sent three open questions to the still-running machine #1 Code instan
 - **Backlog recorded (per Bridge):** CONTEXT §7 extended with deferred product items — (a) per-operator sheets + cross-operator "comparable plans"; (b) promotions view (promo-vs-regular over time); (c) formatted dashboard — under a **data-correctness/coverage-first** rule. Logged data-quality items: Claro-prepaid parser, and plan-name uniqueness → a stable `plan_id` (schema change, **needs Bridge YES**).
 - Workbook restored after the live run (not committed). Raw captures stay gitignored.
 - **Next (Architect):** TIM adapter (Drupal HTML + SVG-embedded prices, state in URL path), and/or the deferred Claro-prepaid parser / `plan_id` schema decision.
+
+### 2026-06-19 — CODE TASK #5: TIM adapter live — all three carriers now live (Code)
+- **Fetch path (recon):** TIM is server-rendered Drupal; plain `httpx` GET → **200** (no anti-bot, no browser). DOM is noisy (Acquia Site Studio, per-instance UUID classes, device sales) with **no clean plan-card class and no `<table>`**. The structured grid is embedded JSON: `<script data-drupal-selector="drupal-settings-json">` → **`settings["ofertas"][]`**. Documented in CONTEXT §3.
+- **SVG-price outcome — no OCR needed.** The hero SVG `alt` carries the marketing headline price, but **every per-plan price is a clean JSON text value** (`field_preco_card_oferta`), so OCR was unnecessary (no Bridge ask required). Body-text prices (HBO Max R$20,90 etc.) are add-ons, ignored.
+- **Adapter** (`adapters/tim.py`): pure `parse_tim_html(html, target)` (reads the drupal-settings JSON, walks to `ofertas`, maps `field_preco_card_oferta` → price and cleaned `title` → name+GB) + thin `httpx` `fetch()` (real UA, delay, single retry, raw `.html` capture). No Playwright.
+- **Live run** `python -m mobile_tracker.main --only tim` → `Collected 15 valid plans across 3 targets. tim: 15` (exit 3 = expected vivo/claro zero-alert).
+  - **control (5):** TIM Controle Plus 45GB R$64,99 · TIM Controle 41GB R$58,99 · Premium 53GB R$84,99 · Light Express 31GB R$60,99 · Pro Express R$64,99
+  - **postpaid / TIM Black (7):** 70GB R$129,99 · Plus 80GB R$149,99 · Premium 110GB R$159,99 · C Ultra 95GB R$159,99 · A Express 67GB R$119,99 · B Express 82GB R$144,99 · C Express 107GB R$164,99
+  - **prepaid / TIM Pré XIP (3):** 6GB R$20 · 8GB R$25 · 16GB R$30 (price = recarga amount)
+- **Tests:** added `tests/test_tim.py` (5 tests) against a tiny 1KB fixture holding the real `ofertas` JSON (mapping, title cleaning incl. `[PROD]`/`[On Air]` + dash handling, price parse, dedup). Full suite **17 → 22 passed**.
+- **Blocks:** none.
+- **Milestone:** **all three carriers now live — 52 real SP plans** (Claro 13 + Vivo 24 + TIM 15). Parked the Bridge's cross-operator **comparison methodology** (within-category, align by price rank) in CONTEXT §7.
+- Workbook restored (not committed). Raw captures gitignored.
+- **Next (Architect):** the deferred items — Claro-prepaid parser, the `plan_id` schema decision (needs Bridge YES), then wiring the **daily GitHub Actions job** (first committed history) + the per-operator/promotions/dashboard backlog.
