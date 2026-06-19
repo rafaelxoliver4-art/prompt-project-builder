@@ -16,8 +16,8 @@
 | Reconnaissance | ✅ done | Stacks identified (TIM=Drupal, Claro=Next.js, Vivo=AEM). See CONTEXT §3. |
 | Data schema | ✅ done | `Plan` dataclass defined (CONTEXT §6). |
 | Excel writer | ✅ done (offline) | Works on fixture data; verified by demo run + unit test. |
-| Adapters (vivo/claro/tim) | 🟡 stubs | Interfaces + documented strategy; **selectors/parsing TBD by Code on live sites.** |
-| Live scraping | 🔌 not started | Needs Code on a real machine (sandbox can't reach the sites). |
+| Adapters (vivo/claro/tim) | 🟡 claro live; vivo/tim stubs | **Claro** parses real SP plans (postpaid/control/flex) via `__NEXT_DATA__`. Vivo/TIM still stubs. |
+| Live scraping | 🟡 partial | **Claro live** (13 SP plans, 2026-06-19). Vivo/TIM + Claro **prepaid** pending. |
 | Scheduling (GitHub Actions) | 🟡 drafted | Workflow file present; needs repo + secrets + first run. |
 | GitHub + Drive backup | 🟡 partial | GitHub repo live (private, pushed by Code). Drive mirror not started. |
 
@@ -110,3 +110,15 @@ Machine #2 sent three open questions to the still-running machine #1 Code instan
 - **Offline smoke test GREEN:** `$env:PYTHONPATH="src"; pytest -q` → **6 passed**. `--demo` → `Wrote data\mobile_plans.xlsx: 3 plans in latest (2026-06-19), 4 snapshot(s), 12 change(s).` Excel COM recalc confirmed 4 sheets + real summary KPIs (vivo R$150.00 / claro R$64.99 / tim R$30.00 — one demo plan per carrier). Demo workbook restored via `git checkout --` (not committed).
 - **Still outstanding (unchanged):** `.github/workflows/mobile-price-tracker.yml` remains un-pushed (this machine's `gh` token still lacks `workflow` scope); CI workflow needs the `PYTHONPATH=src` fix before the first Actions run. Both deferred to the Actions-wiring task.
 - **Next:** CODE TASK #3 — implement the Claro adapter (first live data via `__NEXT_DATA__`).
+
+### 2026-06-19 — CODE TASK #3: Claro adapter live — FIRST REAL DATA (Code)
+- **Editable install:** `pip install -e .` — `python -m mobile_tracker.main` now runs with **no `PYTHONPATH`** (kills the recurring quirk and the CI "Run tracker" bug). `pyproject.toml` already had the packaging config; no change needed.
+- **Adapter** (`adapters/claro.py`): split into a **pure** `parse_next_data(data, target)` (offline-testable) + a polite `fetch()` (one `httpx` GET/page, real UA, 2–6s random delay, single retry, raw capture saved to `data/raw/`). Parses the Storyblok `__NEXT_DATA__` tree (`dynamicComponents.body[] → card_360 → data.data[]`). **No Playwright needed** — modal detail is already embedded (§3 documents the full JSON path + the two price formats).
+- **Live run** `python -m mobile_tracker.main --only claro` → `Collected 13 valid plans across 4 targets. claro: 13`. (Exit code 3 is the expected vivo/tim-zero alert from a single-carrier run, not a failure.)
+  - **postpaid (5):** Pós 60GB R$124,90 · Pós 50GB com GeForce NOW R$164,90 · Pós 100GB R$179,90 · Pós 150GB R$239,90 · Pós 200GB R$339,90
+  - **control (4):** Controle 20GB R$44,90 · Controle 25GB R$59,90 (promo R$54,90) · Controle 30GB R$69,90 · Controle 30GB R$99,90
+  - **flex (4):** Flex 15GB R$44,90 · Flex 20GB R$59,90 · Flex 30GB R$69,90 · Flex 40GB R$119,90
+- **Tests:** added `tests/test_claro.py` (5 tests) against a trimmed 44KB real-capture fixture (`tests/fixtures/claro_pos_sp.json`) covering field mapping, the slug-name fallback, promo pricing, BRL parsing, and dedup. Full suite **6 → 12 passed**.
+- **Findings / deferred:** (a) **Claro prepaid (Prezão)** uses a different layout (`card`/`tab_select`, no `card_360`) → 0 plans today; needs its own parser. (b) Two `Controle 30GB` tiers share a name at different prices — both kept in `history`; `latest` (keyed by name) collapses them. (c) No anti-bot wall encountered — plain GET returned full `__NEXT_DATA__`.
+- Workbook restored after the live run (not committed). Raw captures stay gitignored.
+- **Next (Architect):** Vivo adapter (AEM `.model.json` probe) or TIM (HTML + SVG-price), and optionally a Claro-prepaid parser.

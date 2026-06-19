@@ -1,38 +1,169 @@
-"""Claro adapter.
+"""Claro adapter — live plan scraping via the Next.js ``__NEXT_DATA__`` JSON.
 
-STRATEGY (from recon, CONTEXT §3): Claro is a Next.js app. The cleanest path is to
-fetch the page HTML and parse the embedded `__NEXT_DATA__` <script> JSON, which holds
-the plan objects structured — far more robust than scraping rendered cards. City
-defaults to São Paulo/SP via geolocation; if a different state is needed, set the
-city via the site's mechanism (cookie/param) before reading, or use the headless
-browser fallback. Implement `fetch()` here.
+STRATEGY (verified against the live site 2026-06-19, CONTEXT §3):
+Claro's plan pages are a Next.js app whose ``<script id="__NEXT_DATA__">`` carries a
+Storyblok-style CMS tree. The plan grid is a component with ``component == "card_360"``
+under ``props.pageProps.dynamicComponents.body[]``; each entry in that component's
+``data.data`` is one plan card. Per card:
 
-Skeleton Code can flesh out:
-    1. httpx GET target.url with cfg user_agent/timeout (+ polite delay).
-    2. Locate <script id="__NEXT_DATA__" type="application/json"> ... </script>.
-    3. json.loads it; walk to the plans list (inspect the structure once, record the
-       JSON path in CONTEXT.md so it's documented).
-    4. Map each plan object -> Plan via self.make_plan(target, plan_name=..., price_brl=..., ...).
-    5. Save the raw JSON to settings.raw_capture_dir for audit (raw_ref).
+  * price → ``card["actions"][0]["price"]["price"]``  (a string, e.g. ``"R$ 124,90"``)
+  * name  → ``card["actions"][0]["link"][0]["modalContent"]["title"]`` (e.g. ``"Pós 100GB"``).
+            Some cards leave this empty; we then derive it from the modal's accordion
+            slug (``…plano-pos-60gb…`` → ``"Pós 60GB"``) using the Target's category label.
+  * features → ``card["detail"][*]["label"]`` (WhatsApp ilimitado, roaming, cloud, etc.)
 
-FULL DETAIL (Bridge decision, CONTEXT §10.2): we want the data behind "ver mais"/detail
-modals too, not just headline cards. For Claro this is often a non-issue — `__NEXT_DATA__`
-usually already embeds the full plan detail (the modals are just rendered from the same
-JSON). Verify that first; only fall back to Playwright interaction if some detail proves
-to be fetched lazily and is genuinely absent from the initial JSON.
+FULL DETAIL (Bridge decision §10.2): the "ver mais" modal content is **already embedded**
+in ``__NEXT_DATA__`` (under ``modalContent``), so a plain ``httpx`` GET is sufficient —
+**no Playwright interaction required** for Claro. State defaults to São Paulo/SP via the
+site's geolocation; ``state`` is carried from the Target, not re-derived from the page.
 """
 from __future__ import annotations
+
+import json
+import random
+import re
+import time
+from pathlib import Path
+
+import httpx
+from selectolax.parser import HTMLParser
 
 from .base import BaseAdapter
 from ..config import Target
 from ..models import Plan
+
+# "R$ 124,90" / "R$ 1.234,56" / bare "54,90" → 124.90 / 1234.56 / 54.90
+# (postpaid prices carry the "R$"; control/flex store a bare "54,90" in price + the regular
+# price in a separate `prefix` field, so the R$ is optional.)
+_PRICE = re.compile(r"(?:R\$\s*)?([\d.]+),(\d{2})")
+_GB = re.compile(r"(\d+)\s*GB", re.I)
+# accordion slug like "…-plano-pos-60gb-…" → the data amount, for the name fallback
+_SLUG_GB = re.compile(r"plano-[a-z]+-(\d+)\s*gb", re.I)
+
+
+def _parse_brl(text: str | None) -> float | None:
+    if not text:
+        return None
+    m = _PRICE.search(text)
+    if not m:
+        return None
+    return float(f"{m.group(1).replace('.', '')}.{m.group(2)}")
+
+
+def _clean(text: str | None) -> str:
+    return " ".join(text.split()) if text else ""
+
+
+def parse_next_data(data: dict, target: Target, raw_ref: str | None = None) -> list[Plan]:
+    """Pure mapping: ``__NEXT_DATA__`` dict → list[Plan]. No network, no I/O — unit-testable."""
+    dc = data.get("props", {}).get("pageProps", {}).get("dynamicComponents", {}) or {}
+    body = dc.get("body", []) or []
+    plans: list[Plan] = []
+    seen: set[tuple[str, float]] = set()
+
+    for comp in body:
+        if not isinstance(comp, dict) or comp.get("component") != "card_360":
+            continue
+        cards = (comp.get("data", {}) or {}).get("data", []) or []
+        for card in cards:
+            if not isinstance(card, dict):
+                continue
+            actions = card.get("actions") or []
+            if not actions or not isinstance(actions[0], dict):
+                continue
+            act = actions[0]
+
+            price_obj = act.get("price") or {}
+            price = _parse_brl(price_obj.get("price"))
+            if price is None:  # a card with no headline price is not a usable plan row
+                continue
+            # Promo: control/flex show a struck-through regular price in `prefix`
+            # ("~De R$ 59,90~ Por:") with the effective price in `price`. Postpaid has no prefix.
+            regular = _parse_brl(price_obj.get("prefix"))
+            note = _clean((price_obj.get("prefix") or "").replace("~", "")) or None
+            if regular and regular != price:
+                price_brl, price_promo_brl = regular, price   # regular vs. discounted
+            else:
+                price_brl, price_promo_brl = price, None
+
+            link = act.get("link") or []
+            modal = link[0].get("modalContent", {}) if link and isinstance(link[0], dict) else {}
+            modal = modal or {}
+            title = _clean(modal.get("title"))
+            slug_hit = _SLUG_GB.search(json.dumps(modal, ensure_ascii=False))
+            if title and _GB.search(title):       # explicit plan name, e.g. "Pós 100GB"
+                name = title
+            elif slug_hit:                          # generic title ("Mais detalhes") → derive from slug
+                name = f"{target.category_label} {slug_hit.group(1)}GB"
+            else:                                   # can't reliably identify the plan → skip, don't guess
+                continue
+
+            gb = _GB.search(name)
+            data_gb = float(gb.group(1)) if gb else None
+
+            labels = [_clean(d.get("label")) for d in (card.get("detail") or [])
+                      if isinstance(d, dict) and _clean(d.get("label"))]
+            unlimited_apps = "WhatsApp" if any("whatsapp" in l.lower() for l in labels) else None
+            extras = "; ".join(labels) or None
+
+            key = (name, price_brl)
+            if key in seen:  # collapse duplicate promo cards (same name+price)
+                continue
+            seen.add(key)
+
+            plans.append(BaseAdapter.make_plan(
+                target,
+                plan_name=name,
+                price_brl=price_brl,
+                price_promo_brl=price_promo_brl,
+                price_note=note,
+                data_gb=data_gb,
+                unlimited_apps=unlimited_apps,
+                extra_benefits=extras,
+                raw_ref=raw_ref,
+            ))
+    return plans
 
 
 class ClaroAdapter(BaseAdapter):
     carrier = "claro"
 
     def fetch(self, target: Target) -> list[Plan]:
-        raise NotImplementedError("Implement Claro __NEXT_DATA__ parsing (see module docstring).")
+        # Politeness: random delay before the single request (GOVERNANCE §3).
+        lo = self.cfg.get("min_delay_seconds", 2)
+        hi = self.cfg.get("max_delay_seconds", 6)
+        time.sleep(random.uniform(lo, hi))
+
+        headers = {"User-Agent": self.cfg.get("user_agent", "")}
+        timeout = self.cfg.get("request_timeout_seconds", 30)
+
+        last_err: Exception | None = None
+        for attempt in range(2):  # one retry max
+            try:
+                resp = httpx.get(target.url, headers=headers, timeout=timeout, follow_redirects=True)
+                resp.raise_for_status()
+                break
+            except httpx.HTTPError as e:
+                last_err = e
+                if attempt == 0:
+                    time.sleep(2)
+        else:
+            raise RuntimeError(f"Claro {target.url}: request failed: {last_err}")
+
+        node = HTMLParser(resp.text).css_first("script#__NEXT_DATA__")
+        if node is None:
+            raise RuntimeError(f"Claro {target.url}: no __NEXT_DATA__ script found "
+                               f"(page may be blocked or restructured)")
+        raw = node.text()
+        raw_ref = self._save_raw(target, raw)
+        return parse_next_data(json.loads(raw), target, raw_ref=raw_ref)
+
+    def _save_raw(self, target: Target, text: str) -> str:
+        d = Path(self.settings.raw_capture_dir)
+        d.mkdir(parents=True, exist_ok=True)
+        path = d / f"claro_{target.category}_{target.state}.json"
+        path.write_text(text, encoding="utf-8")
+        return str(path)
 
     @classmethod
     def demo_plans(cls, target: Target) -> list[Plan]:

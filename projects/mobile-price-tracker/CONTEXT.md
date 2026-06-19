@@ -1,6 +1,6 @@
 # CONTEXT — Mobile Price Tracker
 
-> **Version:** 0.2.6 · **Last updated:** 2026-06-19 · Content decided by the Architect; written by Code.
+> **Version:** 0.2.7 · **Last updated:** 2026-06-19 · Content decided by the Architect; written by Code.
 > The *what / how / why* of this project and every decision behind it. This is the knowledge base and
 > IP. If someone read only this file, they should understand the project well enough to rebuild it.
 > **Standing rule (Bridge):** every CODE TASK ends by updating this file (durable knowledge) AND
@@ -38,6 +38,24 @@ Done via the chat's `web_fetch`. Each carrier's site is built differently, which
 | **Vivo** | **Adobe Experience Manager (AEM)** | Partially server-rendered — a headline offer is already visible in HTML (confirmed: *"60 GB por R$ 150/mês"*, offer code `SELF8221B240`). Full plan grid likely needs JS rendering; **probe for AEM `.model.json` endpoints** first (AEM often exposes a JSON model), else headless browser. | City via geolocation, defaults to SP; "trocar localização" control. State **not** in URL. Cookie consent banner present. |
 
 **Implication:** no single scraping technique fits all three. We use a **per-carrier adapter** pattern with three strategies: JSON-extraction (Claro `__NEXT_DATA__`, maybe Vivo `.model.json`), HTML-parse (TIM), and a shared **headless-browser fallback** (Playwright) for anything that won't yield to a plain request.
+
+### Claro — live structure verified (2026-06-19, CODE TASK #3) ← valuable IP
+
+Confirmed against the live SP pages with a plain `httpx` GET (no Playwright needed). `__NEXT_DATA__` carries a **Storyblok-style CMS tree**, not a clean plan list. The plan grid is the component whose `component == "card_360"` under:
+
+```
+props.pageProps.dynamicComponents.body[]      # iterate; pick components where component == "card_360"
+  → <card_360>.data.data[]                     # each entry = one plan card
+```
+
+Per card (`actions[0]` is the plan action):
+- **price** → `actions[0].price.price`. **Two formats:** postpaid embeds the `R$` (`"R$ 124,90"`); **control/flex** store a bare `"54,90"` with the struck-through regular price in `actions[0].price.prefix` (`"~De R$ 59,90~ Por:"`) → we record regular as `price_brl`, effective as `price_promo_brl`, and the prefix as `price_note`.
+- **name** → `actions[0].link[0].modalContent.title` when it contains "GB" (e.g. `"Pós 100GB"`); otherwise the title is generic (`"Mais detalhes"` / `"Informações sobre o plano"`) and we **derive** `"<category_label> <N>GB"` from the modal accordion slug (`…plano-pos-60gb…`).
+- **features** → `card.detail[*].label` (WhatsApp ilimitado, cloud, roaming, etc.) → `unlimited_apps` / `extra_benefits`.
+
+**Full detail (§10.2):** the "ver mais" modal content is already embedded in `__NEXT_DATA__`, so **no Playwright interaction is required** for Claro.
+
+**Per-category coverage:** **postpaid (5), control (4), flex (4)** parse from `card_360`. **Prepaid (Prezão) does NOT use `card_360`** — its page is built from `card`/`tab_select`/`double_card` components with a different shape, so prepaid yields 0 today and needs its own parser (deferred; "best-effort" per the task). Minor: control surfaces two `Controle 30GB` tiers at different prices that share a name — both are kept in history; the `latest` sheet (keyed by plan name) shows one.
 
 ## 4. Architecture
 
@@ -177,6 +195,7 @@ Nullable fields are expected to be sparse early — parsers improve over time. A
 4. **History horizon → keep ALL snapshots forever (default).** Rows are tiny; revisit roll-ups only if the file grows unwieldy.
 
 ## 11. Changelog
+- **0.2.7 — 2026-06-19** — CODE TASK #3: Claro adapter implemented (first live data). Added §3 "Claro — live structure verified": the `__NEXT_DATA__` → `card_360` JSON path, the two price formats (postpaid `R$ x`; control/flex bare value + struck-through `prefix` → regular/promo), slug-derived names, no-Playwright, and that prepaid uses a different (non-`card_360`) layout → deferred. 13 live SP plans (postpaid 5 / control 4 / flex 4). Editable install (`pip install -e .`) removes the `PYTHONPATH=src` quirk + the CI "Run tracker" bug.
 - **0.2.6 — 2026-06-19** — Bridge clarified there is only ONE working machine (this one — `Rafael`, Python 3.13.14). Added §5 "Current working environment": the deferred env rebuild was completed here in place (foreign 3.12.10 venv removed, fresh 3.13.14 venv, `pip install` completed, **6 tests pass**, `--demo` KPIs real); OneDrive relocation deferred to the future PC change. Marked the "Second machine verified" + machine-#1/#2 sections as historical.
 - **0.2.5 — 2026-06-17** — Cross-checked the transfer with the still-running machine #1 Code instance (via Bridge). Confirmed in §5: Drive mirror **intact** (robocopy finished, workflow file present); **no local-only/gitignored files needed** (no `.env`/`rclone.conf`/credentials); `gh` workflow-scope auth **still pending and per-machine**. Recorded two new items: the **`.git`-inside-cloud-sync hazard** (both machines syncing the same OneDrive `.git` → corruption/divergence risk; sync via GitHub, not OneDrive) and the **CI workflow `PYTHONPATH=src` bug** ("Run tracker" step will `ModuleNotFoundError` on first Actions run).
 - **0.2.4 — 2026-06-17** — CODE TASK #2.5 (transfer verification on machine #2). Added §5 "Second machine verified": Windows 11 Home / Python 3.12.10, git verified identical to GitHub (`0f557e4`, clean diff), workflow file already present via OneDrive sync. Recorded the **McAfee VPN MTU black-hole** blocking PyPI (env rebuild + smoke test deferred), the Google-Drive-not-installed-here caveat, and the Bridge decision to continue from this machine.
