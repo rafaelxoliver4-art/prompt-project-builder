@@ -18,6 +18,7 @@ COLUMNS: list[str] = [
     "category",
     "state",
     "plan_name",
+    "plan_id",
     "price_brl",
     "price_promo_brl",
     "price_note",
@@ -43,6 +44,9 @@ class Plan:
     category: str
     state: str
     plan_name: str
+    # Stable, carrier-native (or deterministically derived) id — unique within a carrier,
+    # never price-derived. The canonical key for latest/history/changes (CONTEXT §4 decision).
+    plan_id: Optional[str] = None
     price_brl: Optional[float] = None
     price_promo_brl: Optional[float] = None
     price_note: Optional[str] = None

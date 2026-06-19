@@ -1,6 +1,6 @@
 # CONTEXT — Mobile Price Tracker
 
-> **Version:** 0.2.9 · **Last updated:** 2026-06-19 · Content decided by the Architect; written by Code.
+> **Version:** 0.3.0 · **Last updated:** 2026-06-19 · Content decided by the Architect; written by Code.
 > The *what / how / why* of this project and every decision behind it. This is the knowledge base and
 > IP. If someone read only this file, they should understand the project well enough to rebuild it.
 > **Standing rule (Bridge):** every CODE TASK ends by updating this file (durable knowledge) AND
@@ -80,6 +80,14 @@ Server-rendered Drupal (Acquia Site Studio). A plain `httpx` GET returns **200**
 
 **Per-category coverage (15 live SP plans):** control 5, postpaid (TIM Black) 7, prepaid (TIM Pré XIP) 3 — **all three parse from the same JSON path**, no Playwright. Prepaid `field_preco_card_oferta` is the recarga amount (R$20/25/30). State is in the URL path (`/sp/…`, config-templated).
 
+### plan_id — per-carrier derivation (2026-06-19, CODE TASK #6) ← valuable IP
+
+Stable, carrier-native, **never price-derived**, namespaced `carrier:<id>`:
+- **Claro** → the plan **slug** from the modal accordion name (`claro:plano-controle-30gb` vs `claro:plano-controle-30gb-gaming`) — distinguishes the two 30GB tiers.
+- **Vivo** → the **offer code** found in the `.unique-card` HTML (`vivo:VIV202600029270` vs `vivo:VIV202600029300`) — distinguishes the two "Vivo Controle"; the `SELF…` code is a fallback.
+- **TIM** → the Drupal **node id** `nid` from the oferta (`tim:155891`); `field_sku` then a name slug as fallbacks.
+- **Fallback (any carrier)** → `carrier:<slugified plan_name>` if a card lacks a native id (deterministic, still stable).
+
 ## 4. Architecture
 
 ```
@@ -118,6 +126,17 @@ Rejected: one generic scraper with CSS selectors for all — too fragile across 
 Choice: each daily run appends a full set of rows tagged with snapshot_date; never overwrite past rows.
 Why: the product *is* the time-series; we must be able to see price changes over time.
 Rejected: overwriting a single "current prices" sheet — loses all history, defeats the purpose.
+```
+```
+[DECISION 2026-06-19] plan_id is the canonical per-plan key (Bridge-approved schema change).
+Choice: every Plan carries a stable `plan_id`, unique within a carrier and NEVER derived from price;
+latest/history/changes are keyed by (carrier, state, plan_id) — not plan_name.
+Why: carriers show multiple distinct plans under one display name (two Claro "Controle 30GB",
+several Vivo "Vivo Controle"); keying by name collapsed them in `latest` and broke per-plan price
+history. Source per carrier (native where available): Claro = plan slug; Vivo = offer code (VIV…/SELF…);
+TIM = Drupal node id (nid). Fallback = a deterministic name slug if a card lacks a native id.
+Rejected: keying by plan_name (collapses distinct plans) or by price (unstable day to day).
+Schema bump → CONTEXT v0.3.0.
 ```
 
 ## 5. Tech stack
@@ -173,6 +192,7 @@ Three copies of the project exist; **GitHub is the source of truth**, the other 
 | `category` | str | `postpaid` / `control` / `prepaid` / `lite` / `flex`. |
 | `state` | str | `SP` for now. |
 | `plan_name` | str | As shown on site (pt-BR). |
+| `plan_id` | str | **Stable per-plan key**, unique within a carrier, **never price-derived**. Native where available (Claro slug, Vivo offer code, TIM `nid`); else a deterministic name slug. Canonical key for latest/history/changes (§4 decision). |
 | `price_brl` | float | Headline monthly price, R$. |
 | `price_promo_brl` | float? | Promo price if distinct from regular. |
 | `price_note` | str? | e.g. "primeiros 3 meses", "com débito automático + conta digital". |
@@ -227,6 +247,7 @@ Nullable fields are expected to be sparse early — parsers improve over time. A
 4. **History horizon → keep ALL snapshots forever (default).** Rows are tiny; revisit roll-ups only if the file grows unwieldy.
 
 ## 11. Changelog
+- **0.3.0 — 2026-06-19** — CODE TASK #6 (schema change, Bridge-approved): added **`plan_id`** to the Plan schema (§6) and as the canonical key. §4 `[DECISION]` adopts (carrier, state, plan_id) for latest/history/changes (never price-derived). §3 documents per-carrier derivation: Claro slug, Vivo offer code (VIV…/SELF…), TIM Drupal `nid` (native), name-slug fallback. `excel_writer` re-keyed → duplicate-named plans (two Claro "Controle 30GB", two Vivo "Vivo Controle") now stay distinct in `latest`. Minor-version bump for the schema change.
 - **0.2.9 — 2026-06-19** — CODE TASK #5: TIM adapter (third/last stack — all three carriers now live). Added §3 "TIM — live structure verified": server-rendered Drupal, plain `httpx`; plans come from the embedded `drupal-settings-json` → `settings["ofertas"][]` (`field_preco_card_oferta` price + `title` name) — **SVG-price concern resolved, no OCR needed**; 15 live SP plans (control 5 / Black 7 / Pré 3), no Playwright. Parked the Bridge's cross-operator **comparison methodology** (within-category, by price rank) in §7.
 - **0.2.8 — 2026-06-19** — CODE TASK #4: Vivo adapter (second live carrier). Added §3 "Vivo — live structure verified": `httpx` 403 / `.model.json` 403 → **Playwright** + `.unique-card` DOM scrape (selectors documented); 24 live SP plans across all four categories (postpaid 7 / control 8 / lite 5 / prepaid 4). Extended the §7 BACKLOG with three deferred product items (per-operator + cross-operator comparison, promotions view, dashboard) under a "data correctness & coverage first" rule, and logged two open data-quality items (Claro-prepaid parser; plan-name uniqueness → stable `plan_id`, a schema change needing Bridge YES).
 - **0.2.7 — 2026-06-19** — CODE TASK #3: Claro adapter implemented (first live data). Added §3 "Claro — live structure verified": the `__NEXT_DATA__` → `card_360` JSON path, the two price formats (postpaid `R$ x`; control/flex bare value + struck-through `prefix` → regular/promo), slug-derived names, no-Playwright, and that prepaid uses a different (non-`card_360`) layout → deferred. 13 live SP plans (postpaid 5 / control 4 / flex 4). Editable install (`pip install -e .`) removes the `PYTHONPATH=src` quirk + the CI "Run tracker" bug.

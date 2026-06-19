@@ -20,7 +20,17 @@ from openpyxl.utils import get_column_letter
 from .models import COLUMNS
 
 FONT = "Arial"
-KEY = ["carrier", "category", "state", "plan_name"]
+# Canonical identity = (carrier, state, plan_id). plan_id is the stable per-plan key (CONTEXT §4);
+# if a row ever lacks plan_id we fall back to plan_name so nothing crashes.
+def _with_key(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    if "plan_id" not in df.columns:
+        df["plan_id"] = pd.NA
+    pid = df["plan_id"].astype("string")
+    df["_key"] = pid.where(pid.notna() & (pid.str.strip() != ""), df["plan_name"].astype("string"))
+    return df
+
+
 HEADER_FILL = PatternFill("solid", fgColor="1F3864")
 HEADER_FONT = Font(name=FONT, bold=True, color="FFFFFF")
 CURRENCY_FMT = 'R$ #,##0.00;[RED]-R$ #,##0.00;"-"'
@@ -34,30 +44,39 @@ def _df(plans) -> pd.DataFrame:
 
 def _merge_history(existing: pd.DataFrame, fresh: pd.DataFrame) -> pd.DataFrame:
     df = pd.concat([existing, fresh], ignore_index=True)
-    df = df.drop_duplicates(subset=["snapshot_date"] + KEY, keep="last")
-    return df.sort_values(["snapshot_date", "carrier", "category", "plan_name"]).reset_index(drop=True)
+    df = _with_key(df)
+    df = df.drop_duplicates(subset=["snapshot_date", "carrier", "state", "_key"], keep="last")
+    df = df.sort_values(["snapshot_date", "carrier", "category", "plan_name"]).reset_index(drop=True)
+    return df.drop(columns=["_key"])
 
 
 def _compute_changes(history: pd.DataFrame) -> pd.DataFrame:
-    cols = ["change_type", "carrier", "category", "state", "plan_name",
+    cols = ["change_type", "carrier", "category", "state", "plan_id", "plan_name",
             "old_price_brl", "new_price_brl", "delta_brl"]
     dates = sorted(history["snapshot_date"].dropna().unique())
     if len(dates) < 2:
         return pd.DataFrame(columns=cols)
     latest, prev = dates[-1], dates[-2]
-    cur = history[history.snapshot_date == latest].set_index(KEY)
-    old = history[history.snapshot_date == prev].set_index(KEY)
+    h = _with_key(history)
+    h["_ck"] = h["carrier"].astype(str) + "|" + h["state"].astype(str) + "|" + h["_key"].astype(str)
+    cur = h[h.snapshot_date == latest].drop_duplicates("_ck").set_index("_ck")
+    old = h[h.snapshot_date == prev].drop_duplicates("_ck").set_index("_ck")
+
+    def base(r):  # carrier, category, state, plan_id, plan_name — matched by (carrier, state, plan_id)
+        return [r["carrier"], r["category"], r["state"], r["plan_id"], r["plan_name"]]
+
     out = []
     for k in cur.index.difference(old.index):
         r = cur.loc[k]
-        out.append(["new", *k, None, r.price_brl, None])
+        out.append(["new", *base(r), None, r["price_brl"], None])
     for k in old.index.difference(cur.index):
         r = old.loc[k]
-        out.append(["removed", *k, r.price_brl, None, None])
+        out.append(["removed", *base(r), r["price_brl"], None, None])
     for k in cur.index.intersection(old.index):
-        np_, op = cur.loc[k].price_brl, old.loc[k].price_brl
+        r, o = cur.loc[k], old.loc[k]
+        np_, op = r["price_brl"], o["price_brl"]
         if pd.notna(np_) and pd.notna(op) and float(np_) != float(op):
-            out.append(["price_change", *k, op, np_, float(np_) - float(op)])
+            out.append(["price_change", *base(r), op, np_, float(np_) - float(op)])
     return pd.DataFrame(out, columns=cols)
 
 
@@ -112,7 +131,7 @@ def write_workbook(plans, path: str | Path, run_ts: datetime) -> dict:
         changes.to_excel(xl, sheet_name="changes", index=False)
         _format_sheet(xl.sheets["history"], cur_cols, num_cols)
         _format_sheet(xl.sheets["latest"], cur_cols, num_cols)
-        _format_sheet(xl.sheets["changes"], (6, 7, 8))
+        _format_sheet(xl.sheets["changes"], (7, 8, 9))
         _write_summary(xl, run_ts, latest_date, len(latest), history["snapshot_date"].nunique())
 
     return {

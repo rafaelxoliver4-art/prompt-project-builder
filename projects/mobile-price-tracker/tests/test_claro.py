@@ -94,3 +94,12 @@ def test_promo_pricing_and_slug_name():
     assert p.price_promo_brl == 54.90       # effective/discounted
     assert p.data_gb == 25.0
     assert p.category == "control"
+    assert p.plan_id == "claro:plano-controle-25gb"   # native slug
+
+
+def test_plan_id_native_slug_and_unique():
+    plans = _plans()
+    assert all(p.plan_id and p.plan_id.startswith("claro:") for p in plans)
+    ids = [p.plan_id for p in plans]
+    assert len(ids) == len(set(ids))                  # never price-derived; unique
+    assert any("plano-pos-60gb" in p.plan_id for p in plans)

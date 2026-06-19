@@ -28,7 +28,7 @@ from pathlib import Path
 import httpx
 from selectolax.parser import HTMLParser
 
-from .base import BaseAdapter
+from .base import BaseAdapter, slugify
 from ..config import Target
 from ..models import Plan
 
@@ -37,8 +37,21 @@ from ..models import Plan
 # price in a separate `prefix` field, so the R$ is optional.)
 _PRICE = re.compile(r"(?:R\$\s*)?([\d.]+),(\d{2})")
 _GB = re.compile(r"(\d+)\s*GB", re.I)
-# accordion slug like "…-plano-pos-60gb-…" → the data amount, for the name fallback
-_SLUG_GB = re.compile(r"plano-[a-z]+-(\d+)\s*gb", re.I)
+# native plan slug, e.g. "plano-controle-30gb-gaming" (distinguishes the two 30GB tiers)
+_SLUG = re.compile(r"plano-[a-z]+-\d+gb[a-z0-9-]*", re.I)
+
+
+def _claro_slug(modal: dict) -> str | None:
+    """The card's native plan slug — the stable plan_id source (drops '-mais-detalhes/-informacoes')."""
+    try:
+        name = modal["drawer_select_list"][0]["accordion_list_relations"]["name"]
+    except (KeyError, IndexError, TypeError):
+        name = json.dumps(modal, ensure_ascii=False)
+    m = _SLUG.search(name or "")
+    if not m:
+        return None
+    s = re.sub(r"-mais-(?:detalhes|informacoes).*$", "", m.group(0), flags=re.I)
+    return re.sub(r"-mais$", "", s, flags=re.I)
 
 
 def _parse_brl(text: str | None) -> float | None:
@@ -59,7 +72,7 @@ def parse_next_data(data: dict, target: Target, raw_ref: str | None = None) -> l
     dc = data.get("props", {}).get("pageProps", {}).get("dynamicComponents", {}) or {}
     body = dc.get("body", []) or []
     plans: list[Plan] = []
-    seen: set[tuple[str, float]] = set()
+    seen: set[str] = set()
 
     for comp in body:
         if not isinstance(comp, dict) or comp.get("component") != "card_360":
@@ -89,14 +102,16 @@ def parse_next_data(data: dict, target: Target, raw_ref: str | None = None) -> l
             link = act.get("link") or []
             modal = link[0].get("modalContent", {}) if link and isinstance(link[0], dict) else {}
             modal = modal or {}
+            slug = _claro_slug(modal)               # native, unique (e.g. "plano-controle-30gb-gaming")
             title = _clean(modal.get("title"))
-            slug_hit = _SLUG_GB.search(json.dumps(modal, ensure_ascii=False))
-            if title and _GB.search(title):       # explicit plan name, e.g. "Pós 100GB"
+            if title and _GB.search(title):         # explicit plan name, e.g. "Pós 100GB"
                 name = title
-            elif slug_hit:                          # generic title ("Mais detalhes") → derive from slug
-                name = f"{target.category_label} {slug_hit.group(1)}GB"
+            elif slug:                              # generic title ("Mais detalhes") → derive from slug
+                gbm = re.search(r"-(\d+)gb", slug)
+                name = f"{target.category_label} {gbm.group(1)}GB" if gbm else target.category_label
             else:                                   # can't reliably identify the plan → skip, don't guess
                 continue
+            plan_id = f"claro:{slug}" if slug else f"claro:{slugify(name)}"
 
             gb = _GB.search(name)
             data_gb = float(gb.group(1)) if gb else None
@@ -106,14 +121,14 @@ def parse_next_data(data: dict, target: Target, raw_ref: str | None = None) -> l
             unlimited_apps = "WhatsApp" if any("whatsapp" in l.lower() for l in labels) else None
             extras = "; ".join(labels) or None
 
-            key = (name, price_brl)
-            if key in seen:  # collapse duplicate promo cards (same name+price)
+            if plan_id in seen:  # collapse duplicate cards of the same plan (same native id)
                 continue
-            seen.add(key)
+            seen.add(plan_id)
 
             plans.append(BaseAdapter.make_plan(
                 target,
                 plan_name=name,
+                plan_id=plan_id,
                 price_brl=price_brl,
                 price_promo_brl=price_promo_brl,
                 price_note=note,

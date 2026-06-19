@@ -38,6 +38,13 @@ def test_known_plan_fields():
     assert plus is not None
     assert plus.price_brl == 64.99
     assert plus.data_gb == 45.0
+    assert plus.plan_id == "tim:155891"   # native Drupal node id
+
+
+def test_plan_id_native_nid_and_unique():
+    plans = _plans()
+    assert all(p.plan_id and p.plan_id.startswith("tim:") for p in plans)
+    assert len({p.plan_id for p in plans}) == len(plans)
 
 
 def test_title_cleaning():

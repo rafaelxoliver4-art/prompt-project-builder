@@ -58,3 +58,11 @@ def test_price_parsing():
 def test_no_duplicate_name_price():
     keys = [(p.plan_name, p.price_brl) for p in _plans()]
     assert len(keys) == len(set(keys))
+
+
+def test_plan_id_native_offer_code():
+    plans = _plans()
+    assert all(p.plan_id and p.plan_id.startswith("vivo:") for p in plans)
+    assert len({p.plan_id for p in plans}) == len(plans)        # unique per card
+    amazon = next(p for p in plans if "Amazon" in p.plan_name)
+    assert amazon.plan_id.startswith(("vivo:VIV", "vivo:SELF"))  # native offer code

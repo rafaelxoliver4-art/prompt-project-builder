@@ -7,10 +7,17 @@ end-to-end pipeline (config -> adapter -> Excel) is verifiable offline with no n
 """
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 
 from ..config import Settings, Target
 from ..models import Plan
+
+
+def slugify(text: str | None) -> str:
+    """Lowercase ASCII slug for fallback plan_ids — only used when no native id exists."""
+    s = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
+    return s or "x"
 
 
 class BaseAdapter(ABC):

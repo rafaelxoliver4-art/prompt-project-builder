@@ -26,11 +26,14 @@ from pathlib import Path
 
 from selectolax.parser import HTMLParser
 
-from .base import BaseAdapter
+from .base import BaseAdapter, slugify
 from ..config import Target
 from ..models import Plan
 
 _GB = re.compile(r"(\d+)\s*GB", re.I)
+# native offer code (the "Baixar condições da oferta VIV…" code, unique per card; SELF… is a fallback)
+_VIV = re.compile(r"VIV\d{6,}")
+_SELF = re.compile(r"SELF\d{3,}[A-Z0-9]*")
 _STREAMING = ("netflix", "disney", "globoplay", "spotify", "premiere", "max", "paramount", "prime video")
 
 
@@ -55,7 +58,7 @@ def parse_vivo_html(html: str, target: Target, raw_ref: str | None = None) -> li
     """Pure mapping: rendered Vivo HTML → list[Plan]. selectolax only, no network — unit-testable."""
     tree = HTMLParser(html)
     plans: list[Plan] = []
-    seen: set[tuple[str, float]] = set()
+    seen: set[str] = set()
 
     for card in tree.css(".unique-card"):
         plan_el = card.css_first(".unique-card__plan")
@@ -64,6 +67,9 @@ def parse_vivo_html(html: str, target: Target, raw_ref: str | None = None) -> li
         price = _price_from(price_el.text()) if price_el is not None else None
         if not name or price is None:
             continue
+
+        code = _VIV.search(card.html or "") or _SELF.search(card.html or "")
+        plan_id = f"vivo:{code.group(0)}" if code else f"vivo:{slugify(name)}"
 
         ben = card.css_first(".unique-card__header-benefit")
         gb = _GB.search(ben.text()) if ben is not None else None
@@ -80,14 +86,14 @@ def parse_vivo_html(html: str, target: Target, raw_ref: str | None = None) -> li
         cob = card.css_first(".unique-card__features-cobranded-title")
         extra = _clean(cob.text()) if cob is not None else (f"Inclui {bundle}" if bundle else None)
 
-        key = (name, price)
-        if key in seen:
+        if plan_id in seen:
             continue
-        seen.add(key)
+        seen.add(plan_id)
 
         plans.append(BaseAdapter.make_plan(
             target,
             plan_name=name,
+            plan_id=plan_id,
             price_brl=price,
             data_gb=data_gb,
             data_note=data_note,

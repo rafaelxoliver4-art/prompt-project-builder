@@ -31,7 +31,7 @@ from pathlib import Path
 import httpx
 from selectolax.parser import HTMLParser
 
-from .base import BaseAdapter
+from .base import BaseAdapter, slugify
 from ..config import Target
 from ..models import Plan
 
@@ -95,7 +95,7 @@ def parse_tim_html(html: str, target: Target, raw_ref: str | None = None) -> lis
         return []
 
     plans: list[Plan] = []
-    seen: set[tuple[str, float]] = set()
+    seen: set[str] = set()
     for o in _iter_ofertas(settings):
         price = _price_brl(_field(o, "field_preco_card_oferta"))
         name = _clean_title(o.get("title")) or _field(o, "field_nome_da_oferta")
@@ -103,12 +103,18 @@ def parse_tim_html(html: str, target: Target, raw_ref: str | None = None) -> lis
             continue
         gb = _GB.search(name)
         data_gb = float(gb.group(1)) if gb else None
-        key = (name, price)
-        if key in seen:
+        # native Drupal node id (e.g. "155891"); fall back to the SKU field, then a name slug
+        nid = _field(o, "nid")
+        if nid and str(nid).strip():
+            plan_id = f"tim:{nid}"
+        else:
+            sku = _field(o, "field_sku")
+            plan_id = f"tim:{sku}" if sku else f"tim:{slugify(name)}"
+        if plan_id in seen:
             continue
-        seen.add(key)
+        seen.add(plan_id)
         plans.append(BaseAdapter.make_plan(
-            target, plan_name=name, price_brl=price, data_gb=data_gb, raw_ref=raw_ref))
+            target, plan_name=name, plan_id=plan_id, price_brl=price, data_gb=data_gb, raw_ref=raw_ref))
     return plans
 
 

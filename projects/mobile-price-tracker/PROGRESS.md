@@ -14,7 +14,7 @@
 | Foundations (root docs) | ✅ done | INSTRUCTIONS / GOVERNANCE / WORKFLOW / READMEs created. |
 | Project scaffold | ✅ done | Folder layout, CONTEXT, PROGRESS, config, src skeleton, tests, CI workflow. |
 | Reconnaissance | ✅ done | Stacks identified (TIM=Drupal, Claro=Next.js, Vivo=AEM). See CONTEXT §3. |
-| Data schema | ✅ done | `Plan` dataclass defined (CONTEXT §6). |
+| Data schema | ✅ done | `Plan` dataclass + stable **`plan_id`** (CONTEXT §6 / §4 decision); canonical key = (carrier, state, plan_id). |
 | Excel writer | ✅ done (offline) | Works on fixture data; verified by demo run + unit test. |
 | Adapters (vivo/claro/tim) | ✅ all three live | **Claro** (`__NEXT_DATA__`), **Vivo** (Playwright DOM), **TIM** (Drupal `ofertas` JSON) parse real SP plans. |
 | Live scraping | 🟡 3 carriers live | **Claro** 13 + **Vivo** 24 + **TIM** 15 = **52** live SP plans, 2026-06-19. Claro-**prepaid** + `plan_id` pending. |
@@ -150,3 +150,16 @@ Machine #2 sent three open questions to the still-running machine #1 Code instan
 - **Milestone:** **all three carriers now live — 52 real SP plans** (Claro 13 + Vivo 24 + TIM 15). Parked the Bridge's cross-operator **comparison methodology** (within-category, align by price rank) in CONTEXT §7.
 - Workbook restored (not committed). Raw captures gitignored.
 - **Next (Architect):** the deferred items — Claro-prepaid parser, the `plan_id` schema decision (needs Bridge YES), then wiring the **daily GitHub Actions job** (first committed history) + the per-operator/promotions/dashboard backlog.
+
+### 2026-06-19 — CODE TASK #6: stable plan_id + re-keyed latest/history/changes (Code)
+- **Schema change (Bridge-approved):** added `plan_id` to the `Plan` dataclass + `COLUMNS` (after `plan_name`); CONTEXT → **v0.3.0**. `[DECISION 2026-06-19]` recorded in §4: canonical key = (carrier, state, plan_id), **never price-derived**.
+- **Per-carrier plan_id (native where available, §3):**
+  - **Claro** → plan **slug** (`claro:plano-controle-30gb` vs `claro:plano-controle-30gb-gaming`).
+  - **Vivo** → **offer code** from the card HTML (`vivo:VIV202600029270` vs `…300`); `SELF…` fallback.
+  - **TIM** → Drupal **`nid`** (`tim:155891`); `field_sku` then a name-slug as fallbacks. (Note: `nid` is a Drupal list-field `[{"value": …}]` — unwrapped via `_field`.)
+  - Fallback for any card lacking a native id → `carrier:<slugified plan_name>` (deterministic). Added `slugify()` to `adapters/base.py`.
+- **`excel_writer` re-keyed:** history dedup = (snapshot_date, carrier, state, plan_id); `latest` no longer collapses same-named plans; `changes` matches by (carrier, state, plan_id) and now carries a `plan_id` column. Falls back to `plan_name` if `plan_id` is ever missing (so old/demo rows don't crash).
+- **Tests (22 → 27):** each adapter test asserts `plan_id` is native + unique; **collision test** proves two "Controle 30GB" with distinct ids both survive in `latest`; **per-plan price-change test** proves a move on one isn't confused with the same-named other. Rebuilt the TIM fixture to include `nid`. All offline.
+- **Review run** `python -m mobile_tracker.main` (all 3 carriers) → `Collected 50 valid plans across 11 targets` (claro 13 / tim 15 / vivo 22); **`latest` = 49 distinct rows**, every `plan_id` set + unique. Confirmed the duplicate-named plans are now **separate rows**: Claro "Controle 30GB" ×2 (R$69.9 / R$99.9), Vivo "Vivo Controle" ×2 (R$59 / R$80). (50→49: one Claro flex card cross-listed on two category pages correctly shares its `plan_id`.)
+- **Review workbook left at `data/mobile_plans.xlsx` (uncommitted)** for the Bridge to open — fresh single snapshot of real SP data. Not committed (per task). Raw captures gitignored.
+- **Next (Architect):** wire the **daily GitHub Actions job** (first committed history; needs the one-time `gh` `workflow`-scope auth + the `PYTHONPATH=src`/editable-install fix in the workflow), then the Claro-prepaid parser and the per-operator / promotions / dashboard backlog.
