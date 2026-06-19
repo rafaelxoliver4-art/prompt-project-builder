@@ -1,31 +1,150 @@
-"""Vivo adapter.
+"""Vivo adapter — live plan scraping via Playwright (AEM blocks plain requests).
 
-STRATEGY (from recon, CONTEXT §3): Vivo runs on Adobe Experience Manager (AEM).
-Some offers are already in the server HTML (recon saw "60 GB por R$ 150/mês",
-offer code SELF8221B240), but the full plan grid is likely JS-rendered.
-Two paths, in order of preference:
-    1. Probe for an AEM JSON model endpoint — AEM often serves `<page-path>.model.json`
-       (try appending `.model.json` to the page path). If it returns plan data, parse JSON.
-    2. Otherwise use the Playwright fallback: load the page, accept the cookie banner,
-       confirm SP as location, wait for the plan grid, read the cards.
-Record whichever works (and the JSON path / selectors) in CONTEXT.md.
+RECON (verified 2026-06-19, CONTEXT §3):
+A plain ``httpx`` GET returns **403** (anti-bot challenge page, ~6KB, no prices); appending
+``.model.json`` is also 403. A **real headless Chromium (Playwright)** loads the page (HTTP 200,
+~1MB) and renders the plan grid — no CAPTCHA is presented. There is no clean embedded JSON blob,
+so we scrape the rendered DOM. The plan grid is the ``.unique-card`` component; per card:
 
-FULL DETAIL (Bridge decision, CONTEXT §10.2): capture the "ver mais"/modal content too.
-If the `.model.json` route exposes full detail, prefer it; otherwise the Playwright path
-must click each plan's "ver mais"/detail trigger and read the expanded panel before mapping.
+  * name  → ``.unique-card__plan``            (e.g. "Vivo Pós com Amazon")
+  * price → ``.total-card-price-value``       (e.g. "150"; the visible ``{{ total }}`` template
+                                               in ``.unique-card__price`` is unrendered — ignore it)
+  * data  → ``.unique-card__header-benefit``  (e.g. "60 GB")
+  * franquia/bônus → ``.unique-card__switch-list``;  co-branded bundle (Netflix/Disney+/Amazon…)
+                     is in the plan name and ``.unique-card__features-cobranded-title``.
+
+FULL DETAIL (§10.2): the rendered card already contains the franquia/bonus + co-branded detail,
+so a single page load (no per-card "ver mais" clicking) is enough for the headline fields.
+State defaults to São Paulo/SP via geolocation; ``state`` comes from the Target, not the page.
 """
 from __future__ import annotations
+
+import random
+import re
+import time
+from pathlib import Path
+
+from selectolax.parser import HTMLParser
 
 from .base import BaseAdapter
 from ..config import Target
 from ..models import Plan
+
+_GB = re.compile(r"(\d+)\s*GB", re.I)
+_STREAMING = ("netflix", "disney", "globoplay", "spotify", "premiere", "max", "paramount", "prime video")
+
+
+def _clean(text: str | None) -> str:
+    return " ".join(text.split()) if text else ""
+
+
+def _price_from(text: str | None) -> float | None:
+    """'150' → 150.0 ; '1.329,05' → 1329.05 ; '24,99' → 24.99."""
+    if not text:
+        return None
+    m = re.search(r"\d[\d.]*(?:,\d{2})?", text)
+    if not m:
+        return None
+    raw = m.group(0)
+    if "," in raw:
+        return float(raw.replace(".", "").replace(",", "."))
+    return float(raw.replace(".", ""))
+
+
+def parse_vivo_html(html: str, target: Target, raw_ref: str | None = None) -> list[Plan]:
+    """Pure mapping: rendered Vivo HTML → list[Plan]. selectolax only, no network — unit-testable."""
+    tree = HTMLParser(html)
+    plans: list[Plan] = []
+    seen: set[tuple[str, float]] = set()
+
+    for card in tree.css(".unique-card"):
+        plan_el = card.css_first(".unique-card__plan")
+        name = _clean(plan_el.text()) if plan_el else ""
+        price_el = card.css_first(".total-card-price-value")
+        price = _price_from(price_el.text()) if price_el is not None else None
+        if not name or price is None:
+            continue
+
+        ben = card.css_first(".unique-card__header-benefit")
+        gb = _GB.search(ben.text()) if ben is not None else None
+        data_gb = float(gb.group(1)) if gb else None
+
+        switch = card.css_first(".unique-card__switch-list")
+        data_note = _clean(switch.text()) if switch is not None else None
+
+        bundle = None
+        mm = re.search(r"\bcom\s+(.+)$", name, re.I)
+        if mm:
+            bundle = mm.group(1).strip()
+        streaming = bundle if (bundle and any(s in bundle.lower() for s in _STREAMING)) else None
+        cob = card.css_first(".unique-card__features-cobranded-title")
+        extra = _clean(cob.text()) if cob is not None else (f"Inclui {bundle}" if bundle else None)
+
+        key = (name, price)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        plans.append(BaseAdapter.make_plan(
+            target,
+            plan_name=name,
+            price_brl=price,
+            data_gb=data_gb,
+            data_note=data_note,
+            streaming=streaming,
+            extra_benefits=extra,
+            raw_ref=raw_ref,
+        ))
+    return plans
 
 
 class VivoAdapter(BaseAdapter):
     carrier = "vivo"
 
     def fetch(self, target: Target) -> list[Plan]:
-        raise NotImplementedError("Implement Vivo AEM .model.json probe / Playwright (see docstring).")
+        time.sleep(random.uniform(self.cfg.get("min_delay_seconds", 2),
+                                  self.cfg.get("max_delay_seconds", 6)))
+        html = self._render(target.url)
+        raw_ref = self._save_raw(target, html)
+        return parse_vivo_html(html, target, raw_ref=raw_ref)
+
+    def _render(self, url: str) -> str:
+        # Imported lazily so the module (and the pure parser) import fine without a browser.
+        from playwright.sync_api import sync_playwright
+
+        ua = self.cfg.get("user_agent", "")
+        timeout_ms = int(self.cfg.get("request_timeout_seconds", 30)) * 1000
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=self.cfg.get("headless", True))
+            try:
+                ctx = browser.new_context(user_agent=ua, locale="pt-BR",
+                                          viewport={"width": 1366, "height": 900})
+                page = ctx.new_page()
+                page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+                for sel in ('#onetrust-accept-btn-handler', 'button:has-text("Aceitar")',
+                            'button:has-text("Concordar")'):
+                    try:
+                        el = page.query_selector(sel)
+                        if el:
+                            el.click(timeout=2000)
+                            break
+                    except Exception:
+                        pass
+                page.wait_for_timeout(3000)
+                try:
+                    page.wait_for_selector(".unique-card", timeout=15000)
+                except Exception:
+                    pass  # parser will report zero plans if the grid never rendered
+                return page.content()
+            finally:
+                browser.close()
+
+    def _save_raw(self, target: Target, html: str) -> str:
+        d = Path(self.settings.raw_capture_dir)
+        d.mkdir(parents=True, exist_ok=True)
+        path = d / f"vivo_{target.category}_{target.state}.html"
+        path.write_text(html, encoding="utf-8")
+        return str(path)
 
     @classmethod
     def demo_plans(cls, target: Target) -> list[Plan]:

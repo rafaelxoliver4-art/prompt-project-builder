@@ -1,6 +1,6 @@
 # CONTEXT — Mobile Price Tracker
 
-> **Version:** 0.2.7 · **Last updated:** 2026-06-19 · Content decided by the Architect; written by Code.
+> **Version:** 0.2.8 · **Last updated:** 2026-06-19 · Content decided by the Architect; written by Code.
 > The *what / how / why* of this project and every decision behind it. This is the knowledge base and
 > IP. If someone read only this file, they should understand the project well enough to rebuild it.
 > **Standing rule (Bridge):** every CODE TASK ends by updating this file (durable knowledge) AND
@@ -56,6 +56,18 @@ Per card (`actions[0]` is the plan action):
 **Full detail (§10.2):** the "ver mais" modal content is already embedded in `__NEXT_DATA__`, so **no Playwright interaction is required** for Claro.
 
 **Per-category coverage:** **postpaid (5), control (4), flex (4)** parse from `card_360`. **Prepaid (Prezão) does NOT use `card_360`** — its page is built from `card`/`tab_select`/`double_card` components with a different shape, so prepaid yields 0 today and needs its own parser (deferred; "best-effort" per the task). Minor: control surfaces two `Controle 30GB` tiers at different prices that share a name — both are kept in history; the `latest` sheet (keyed by plan name) shows one.
+
+### Vivo — live structure verified (2026-06-19, CODE TASK #4) ← valuable IP
+
+A plain `httpx` GET returns **403** (anti-bot challenge page, ~6KB, no prices); appending `.model.json` is **also 403**. There is **no usable embedded JSON** (only an Adobe Target monitor blob). A **real headless Chromium (Playwright)** loads the page (HTTP 200, ~1MB) and renders the grid — **no CAPTCHA presented**. So Vivo = **Playwright + DOM scrape** (the sanctioned §10.2 fallback; `httpx` cannot pass the AEM/Akamai JS sensor — this is *use a real browser*, not evasion).
+
+Plan grid = the `.unique-card` component (works on **all four** category pages). Per card:
+- **name** → `.unique-card__plan` (e.g. "Vivo Pós com Amazon")
+- **price** → `.total-card-price-value` (e.g. "150"; the visible `{{ total }}` inside `.unique-card__price` is an **unrendered template** — ignore it)
+- **data** → `.unique-card__header-benefit` ("60 GB"); franquia/bônus → `.unique-card__switch-list`
+- **bundle** (Netflix/Disney+/Globoplay/Spotify/Premiere…) is in the name + `.unique-card__features-cobranded-title` → mapped to `streaming` / `extra_benefits`.
+
+**Per-category coverage (24 live SP plans):** postpaid 7, control 8, lite (Easy/Lite) 5, prepaid 4 — **all four work** with one selector set. A single page load suffices (no per-card "ver mais" clicking for the headline fields). Same naming-uniqueness caveat as Claro: several cards share a name at different prices (e.g. two "Vivo Controle", several "Easy Lite") → kept in history, collapsed in `latest`.
 
 ## 4. Architecture
 
@@ -173,7 +185,14 @@ Nullable fields are expected to be sparse early — parsers improve over time. A
 - **`changes`** — computed diff vs the previous snapshot date: new plans, removed plans, price ↑/↓.
 - **`summary`** — run metadata + a few KPIs (plan counts per carrier, min/avg/max price) using Excel formulas.
 
-> **BACKLOG (deferred, per §10.1):** target end-state is **one sheet per carrier** plus a formatted **dashboard** sheet (charts + headline KPIs). Build this only after the live pipeline is proven; the function-based sheets above are the interim layout.
+> **BACKLOG (deferred, per §10.1 — presentation comes AFTER data correctness & coverage):** the interim function-sheets stay until the pipeline is proven across all three carriers. **Data quality first, presentation second.** Deferred product items (Bridge, 2026-06-19):
+> 1. **Per-operator organization** — one sheet per carrier (vivo/claro/tim) **plus** a cross-operator **"comparable plans"** sheet that aligns plans by data/price tier across carriers.
+> 2. **PROMOTIONS view/sheet** — track promo-vs-regular price over time (we already capture `price_promo_brl` + `price_note`; surface the spread and its history).
+> 3. **DASHBOARD** — an attractive, formatted sheet (charts, headline KPIs, buttons/filters).
+>
+> **Open data-quality items (must precede the dashboard):**
+> - **Claro prepaid (Prezão)** parser — its page uses a non-`card_360` layout (§3); 0 plans today.
+> - **Plan-name uniqueness** — several carriers show multiple cards sharing a name at different prices (Claro "Controle 30GB" ×2; Vivo "Vivo Controle" ×2, "Easy Lite" ×N). `latest` (keyed by name) collapses them. Fix with a **stable `plan_id`** field — a **schema change that needs the Bridge's explicit YES** before implementing.
 
 ## 8. Known challenges / risks
 
@@ -195,6 +214,7 @@ Nullable fields are expected to be sparse early — parsers improve over time. A
 4. **History horizon → keep ALL snapshots forever (default).** Rows are tiny; revisit roll-ups only if the file grows unwieldy.
 
 ## 11. Changelog
+- **0.2.8 — 2026-06-19** — CODE TASK #4: Vivo adapter (second live carrier). Added §3 "Vivo — live structure verified": `httpx` 403 / `.model.json` 403 → **Playwright** + `.unique-card` DOM scrape (selectors documented); 24 live SP plans across all four categories (postpaid 7 / control 8 / lite 5 / prepaid 4). Extended the §7 BACKLOG with three deferred product items (per-operator + cross-operator comparison, promotions view, dashboard) under a "data correctness & coverage first" rule, and logged two open data-quality items (Claro-prepaid parser; plan-name uniqueness → stable `plan_id`, a schema change needing Bridge YES).
 - **0.2.7 — 2026-06-19** — CODE TASK #3: Claro adapter implemented (first live data). Added §3 "Claro — live structure verified": the `__NEXT_DATA__` → `card_360` JSON path, the two price formats (postpaid `R$ x`; control/flex bare value + struck-through `prefix` → regular/promo), slug-derived names, no-Playwright, and that prepaid uses a different (non-`card_360`) layout → deferred. 13 live SP plans (postpaid 5 / control 4 / flex 4). Editable install (`pip install -e .`) removes the `PYTHONPATH=src` quirk + the CI "Run tracker" bug.
 - **0.2.6 — 2026-06-19** — Bridge clarified there is only ONE working machine (this one — `Rafael`, Python 3.13.14). Added §5 "Current working environment": the deferred env rebuild was completed here in place (foreign 3.12.10 venv removed, fresh 3.13.14 venv, `pip install` completed, **6 tests pass**, `--demo` KPIs real); OneDrive relocation deferred to the future PC change. Marked the "Second machine verified" + machine-#1/#2 sections as historical.
 - **0.2.5 — 2026-06-17** — Cross-checked the transfer with the still-running machine #1 Code instance (via Bridge). Confirmed in §5: Drive mirror **intact** (robocopy finished, workflow file present); **no local-only/gitignored files needed** (no `.env`/`rclone.conf`/credentials); `gh` workflow-scope auth **still pending and per-machine**. Recorded two new items: the **`.git`-inside-cloud-sync hazard** (both machines syncing the same OneDrive `.git` → corruption/divergence risk; sync via GitHub, not OneDrive) and the **CI workflow `PYTHONPATH=src` bug** ("Run tracker" step will `ModuleNotFoundError` on first Actions run).

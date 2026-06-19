@@ -16,8 +16,8 @@
 | Reconnaissance | ✅ done | Stacks identified (TIM=Drupal, Claro=Next.js, Vivo=AEM). See CONTEXT §3. |
 | Data schema | ✅ done | `Plan` dataclass defined (CONTEXT §6). |
 | Excel writer | ✅ done (offline) | Works on fixture data; verified by demo run + unit test. |
-| Adapters (vivo/claro/tim) | 🟡 claro live; vivo/tim stubs | **Claro** parses real SP plans (postpaid/control/flex) via `__NEXT_DATA__`. Vivo/TIM still stubs. |
-| Live scraping | 🟡 partial | **Claro live** (13 SP plans, 2026-06-19). Vivo/TIM + Claro **prepaid** pending. |
+| Adapters (vivo/claro/tim) | 🟡 claro+vivo live; tim stub | **Claro** (`__NEXT_DATA__`) + **Vivo** (Playwright DOM) parse real SP plans. TIM still a stub. |
+| Live scraping | 🟡 partial | **Claro** (13) + **Vivo** (24) live SP plans, 2026-06-19. TIM + Claro-**prepaid** pending. |
 | Scheduling (GitHub Actions) | 🟡 drafted | Workflow file present; needs repo + secrets + first run. |
 | GitHub + Drive backup | 🟡 partial | GitHub repo live (private, pushed by Code). Drive mirror not started. |
 
@@ -122,3 +122,17 @@ Machine #2 sent three open questions to the still-running machine #1 Code instan
 - **Findings / deferred:** (a) **Claro prepaid (Prezão)** uses a different layout (`card`/`tab_select`, no `card_360`) → 0 plans today; needs its own parser. (b) Two `Controle 30GB` tiers share a name at different prices — both kept in `history`; `latest` (keyed by name) collapses them. (c) No anti-bot wall encountered — plain GET returned full `__NEXT_DATA__`.
 - Workbook restored after the live run (not committed). Raw captures stay gitignored.
 - **Next (Architect):** Vivo adapter (AEM `.model.json` probe) or TIM (HTML + SVG-price), and optionally a Claro-prepaid parser.
+
+### 2026-06-19 — CODE TASK #4: Vivo adapter live — second carrier (Code)
+- **Fetch path (recon):** plain `httpx` GET → **403** (anti-bot challenge, ~6KB, no prices); `…<page>.model.json` → **also 403**; no usable embedded JSON. A real **headless Chromium (Playwright)** → **HTTP 200**, full ~1MB render, **no CAPTCHA shown**. → Vivo uses **Playwright + DOM scrape** (the sanctioned §10.2 fallback — a real browser, not evasion). Documented in CONTEXT §3.
+- **Adapter** (`adapters/vivo.py`): pure `parse_vivo_html(html, target)` (selectolax scrape of `.unique-card`: name `.unique-card__plan`, price `.total-card-price-value`, data `.unique-card__header-benefit`) + Playwright `fetch()` (one load/page, cookie-banner dismiss, polite delay, raw `.html` capture). Mirrors the Claro split.
+- **Live run** `python -m mobile_tracker.main --only vivo` → `Collected 24 valid plans across 4 targets. vivo: 24` (exit 3 = expected claro/tim zero-alert). **All four categories parse with one selector set:**
+  - **postpaid (7):** Vivo Pós com Amazon R$150 · Globoplay R$165 · Spotify R$165 · Premiere R$180 · Netflix R$180 · Disney+ R$180 · Travel R$215 (70GB)
+  - **control (8):** Vivo Controle R$59 · R$80 · Saúde/Educação/Vantagens R$90 · Música/Netflix R$95 · Entretenimento R$110
+  - **lite (5):** Easy Lite Anual R$20 · Easy Lite R$30/R$40/R$35/R$50
+  - **prepaid (4):** Vivo Pré R$17–R$30
+- **Tests:** added `tests/test_vivo.py` (5 tests) against a trimmed 132KB real Playwright-render fixture (`tests/fixtures/vivo_postpaid_sp.html`). Full suite **12 → 17 passed**.
+- **Blocks:** none (Playwright passed cleanly; no CAPTCHA). httpx 403 is documented, not evaded.
+- **Backlog recorded (per Bridge):** CONTEXT §7 extended with deferred product items — (a) per-operator sheets + cross-operator "comparable plans"; (b) promotions view (promo-vs-regular over time); (c) formatted dashboard — under a **data-correctness/coverage-first** rule. Logged data-quality items: Claro-prepaid parser, and plan-name uniqueness → a stable `plan_id` (schema change, **needs Bridge YES**).
+- Workbook restored after the live run (not committed). Raw captures stay gitignored.
+- **Next (Architect):** TIM adapter (Drupal HTML + SVG-embedded prices, state in URL path), and/or the deferred Claro-prepaid parser / `plan_id` schema decision.
