@@ -1,6 +1,6 @@
 # CONTEXT — Mobile Price Tracker
 
-> **Version:** 0.4.0 · **Last updated:** 2026-06-22 · Content decided by the Architect; written by Code.
+> **Version:** 0.4.1 · **Last updated:** 2026-06-22 · Content decided by the Architect; written by Code.
 > The *what / how / why* of this project and every decision behind it. This is the knowledge base and
 > IP. If someone read only this file, they should understand the project well enough to rebuild it.
 > **Standing rule (Bridge):** every CODE TASK ends by updating this file (durable knowledge) AND
@@ -163,7 +163,7 @@ Python 3.11+ · `playwright` (headless Chromium, JS rendering) · `httpx` (fast 
 
 #### Daily Actions job — LIVE (2026-06-22, CODE TASK #8)
 
-- **Scheduler is ON.** `.github/workflows/mobile-price-tracker.yml` runs **daily at 18:00 BRT** (`cron: 0 21 * * *` UTC) + on-demand (`workflow_dispatch`, default `mode: live`). Each run: `pip install -r requirements.txt && pip install -e .`, `playwright install --with-deps chromium`, offline `pytest`, `python -m mobile_tracker.main` (all three), then commits the refreshed `data/mobile_plans.xlsx` back to the repo (`permissions: contents: write`). **GOVERNANCE §6:** `main.py` exits non-zero if any carrier yields zero plans → the job fails → **no commit** (no fake/partial snapshot).
+- **Scheduler is ON.** `.github/workflows/mobile-price-tracker.yml` runs **daily at 18:00 BRT** (`cron: 0 21 * * *` UTC) + on-demand (`workflow_dispatch`, default `mode: live`). Each run: `pip install -r requirements.txt && pip install -e .`, `playwright install --with-deps chromium`, offline `pytest`, `python -m mobile_tracker.main` (all three), then commits the refreshed `data/mobile_plans.xlsx` back to the repo (`permissions: contents: write`). **The workbook is styled in code (§7 house style, #11), so the committed copy picks up the visual polish automatically from the next daily run.** **GOVERNANCE §6:** `main.py` exits non-zero if any carrier yields zero plans → the job fails → **no commit** (no fake/partial snapshot).
 - **Committed history has BEGUN.** Synthetic seed cleared (`25f0da6`); first **real** snapshot landed via the runner on **2026-06-22** (`b5ca0a0`): **52 collected / 51 in latest**, full 8-sheet workbook.
 - **CI-IP-block risk did NOT materialize:** all three carriers — including **Vivo via headless Playwright** — scraped cleanly from GitHub's datacenter runner. (Re-check on future runs; if a carrier gets challenged from CI, the job alerts and we'd consider a self-hosted runner — never evade.)
 - **Weekly backup wired:** on Mondays (UTC) the daily job copies the workbook to `backups/mobile_plans_<date>.xlsx` and commits it (dated, never overwritten). First: `mobile_plans_2026-06-22.xlsx` (`6bc51f4`).
@@ -253,7 +253,17 @@ Nullable fields are expected to be sparse early — parsers improve over time. A
 
 > **Price-evolution view — design target (parked, 2026-06-22):** once enough daily history accumulates (committed history just began, #8), a **monthly heatmap** — rows = month, columns = carrier × category — color-graded by a **representative price per cell** (cell metric TBD; **prepaid as R$/day** given the unit caveat), with **event annotations** (promo windows, plan launches/removals from the `changes` sheet). Needs accumulated history; buttons/dashboard polish after the pipeline + scheduler are proven (now done). Future view, not scheduled.
 
+> **House style — IMPLEMENTED (#11, 2026-06-22):** the workbook look is applied **in code** (`excel_writer.py`), so the daily job reproduces it every run. Plain `.xlsx` — **no buttons, macros, or `.xlsm`** (Bridge's call). Design system (constants, applied to all sheets): header navy `#1F3864` white-bold + thin bottom border; **gridlines OFF on every sheet**; alternating row banding `#F2F5FA`; carrier-sheet category sub-headers `#D6E0F0`; cheapest-of-row highlight `#C6EFCE`/`#006100`; promo accent `#FFF2CC`; tab colors — Vivo `#660099`, Claro `#DA291C`, TIM `#0033A0`, comparison `#2E7D32`, summary `#102A43`, engine sheets (history/latest/changes) grey `#8A8A8A`. Conditional formatting: **comparison** color-grades the three R$ columns green→yellow→red and highlights the cheapest carrier per rank; **latest + carrier sheets** color-scale the price column (per block); promo cells get the amber accent. First cut — expect iteration.
+
 ## 8. Known challenges / risks
+
+### Price validation (2026-06-22, CODE TASK #11)
+
+Spot-checked the `comparison` sheet against the carriers' official pages + independent sites: the **cheapest-postpaid ranking matched** (TIM ≈R$119,90 < Claro R$124,90 < Vivo R$150) and absolute prices lined up. Open refinements for the comparison work (parked — each can change *which* plan is "cheapest"):
+- **(i) Fidelity vs non-fidelity:** we capture the one displayed price; the cheapest can shift with loyalty (e.g. TIM Controle R$49,99 *fidelizado* vs R$58,99 *boleto*). Decide which to track — or capture both.
+- **(ii) Consistent GB definition:** base vs base+bonus differs by carrier; needed for a fair data-tier view.
+- **(iii) Prepaid normalization:** express prepaid as a monthly / 30-day figure (Prezão R$1/dia → ~R$30/mo) for apples-to-apples.
+- **(iv) R$/GB value lens:** add cost-per-GB so plans can be ranked by *value*, not just absolute price.
 
 - **JS rendering & anti-bot.** Modern telecom SPAs may rate-limit or block headless browsers; we stay polite (1×/day, delays, real UA) and treat blocks as limitations to discuss, never to defeat covertly (see GOVERNANCE §3).
 - **Prices inside images (TIM).** Need OCR or filename/alt parsing for some prices.
@@ -273,6 +283,7 @@ Nullable fields are expected to be sparse early — parsers improve over time. A
 4. **History horizon → keep ALL snapshots forever (default).** Rows are tiny; revisit roll-ups only if the file grows unwieldy.
 
 ## 11. Changelog
+- **0.4.1 — 2026-06-22** — CODE TASK #11: **visual polish pass** (presentation only — no data/adapter/schema changes). House style applied in `excel_writer.py` so the daily job reproduces it: gridlines off on every sheet, navy header + thin border, row banding, branded tab colors, carrier-sheet sub-header accents; conditional formatting — comparison color-grades the R$ columns + highlights the cheapest carrier per rank, latest/carrier sheets color-scale price per block, promo cells amber-accented. **No buttons/macros/.xlsm** (Bridge's call). §7 documents the design system; §8 adds the price-validation note + comparison refinements (fidelity vs boleto, GB definition, prepaid monthly normalization, R$/GB lens). Tests 40 → 45.
 - **0.4.0 — 2026-06-22** — CODE TASK #8: **the daily GitHub Actions job is LIVE and committed history has begun.** `gh workflow` scope authorized; workflow pushed (`pip install -e .` fixes the PYTHONPATH/CI bug; `playwright install --with-deps`); **daily cron 18:00 BRT** (`0 21 * * *` UTC) + on-demand. Synthetic seed cleared; first real snapshot committed by the runner on 2026-06-22 (52 collected / 51 latest, 8 sheets) — **all three carriers scraped from CI** (no datacenter-IP block). **Weekly Monday backup** into `backups/` wired (first: `mobile_plans_2026-06-22.xlsx`). §2 cadence corrected to 18:00 BRT; §5 records the live job + auth-done + PYTHONPATH-fixed; §7 parks the monthly price-evolution heatmap design target. Minor-version bump for the scheduler milestone.
 - **0.3.3 — 2026-06-22** — CODE TASK #10: built the **per-operator sheets** (one tab per carrier — Vivo/Claro/TIM — present in the latest snapshot). Each groups plans by category (Postpaid → Control → Digital → Prepaid), price-sorted, with a readable column set (Plan / Price / Promo / Data / Voice / Unlimited apps / Streaming / Notes). `build_operator_sheets` + `_write_operator_sheets` in `excel_writer.py`, wired after the comparison sheet; the five prior sheets untouched (8 total). §7 per-operator item moved backlog → implemented. Tests 35 → 40.
 - **0.3.2 — 2026-06-22** — CODE TASK #9: built the cross-operator **`comparison`** sheet (§7 methodology now implemented, moved from parking-lot). Four groups (Pure Postpaid / Control-Hybrid / Prepaid / Digital), each rank-aligned across Vivo/Claro/TIM by ascending `price_brl`, with the prepaid-unit + Digital caveats printed in-sheet. `excel_writer.py`: `build_comparison_data` (pure) + `_write_comparison`, wired after `latest`; history/latest/changes/summary untouched. Tests 30 → 35.
