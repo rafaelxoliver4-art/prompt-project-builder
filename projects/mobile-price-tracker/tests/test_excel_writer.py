@@ -17,8 +17,10 @@ def _plan(name, price, date):
 def test_creates_expected_sheets(tmp_path):
     out = tmp_path / "plans.xlsx"
     write_workbook([_plan("A", 50.0, "2026-06-10")], out, datetime(2026, 6, 10, 23))
-    xls = pd.ExcelFile(out)
-    assert set(xls.sheet_names) == {"history", "latest", "changes", "summary", "comparison"}
+    names = set(pd.ExcelFile(out).sheet_names)
+    assert {"history", "latest", "changes", "summary", "comparison"}.issubset(names)
+    assert "Claro" in names                       # operator sheet for the (claro) plan present
+    assert {"Vivo", "TIM"}.isdisjoint(names)      # carriers absent from latest → no sheet
 
 
 def test_history_is_append_only_and_changes_detected(tmp_path):

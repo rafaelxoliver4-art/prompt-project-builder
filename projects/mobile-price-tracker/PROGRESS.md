@@ -182,3 +182,12 @@ Machine #2 sent three open questions to the still-running machine #1 Code instan
 - **Tests 30 → 35:** ascending-per-carrier + rank-alignment, Digital pulls lite+flex (TIM empty), prepaid caveat present, four groups in order, write_workbook emits `comparison` without disturbing the others. All offline.
 - **Review workbook left at `data/mobile_plans.xlsx` (uncommitted)** for the Bridge — open the `comparison` tab. **First cut — expect layout iteration.** CONTEXT → **v0.3.2**.
 - **Next (Architect):** react to the comparison layout; then the **daily GitHub Actions job** (committed history) + the promotions-over-time view and dashboard.
+
+### 2026-06-22 — CODE TASK #10: per-operator sheets (one tab per carrier) (Code)
+- Added **one sheet per carrier** present in the latest snapshot (Vivo / Claro / TIM; absent carriers get none, so it scales). Presentation-only — adapters/schema/scraping untouched. §7 per-operator item moved backlog → built.
+- **Structure:** within each sheet, plans **grouped by category** (Postpaid → Control → Digital {lite,flex} → Prepaid) with a bold sub-header, **sorted ascending by `price_brl`**. Readable column set: **Plan | Price R$ | Promo R$ | Data | Voice | Unlimited apps | Streaming | Notes** (Data = `data_gb`+`data_note`; Notes = `extra_benefits`+`price_note`; `plan_id` omitted; blank where null).
+- **Code:** `build_operator_sheets` (pure, offline-testable) + `_write_operator_sheets` in `excel_writer.py`, wired after the comparison sheet. The five prior sheets (history/latest/changes/summary/comparison) untouched → **8 sheets total**.
+- **Review run** (53 plans / 52 latest) → tabs built: **Vivo** 7+8+5+4, **Claro** (postpaid/control/flex/prepaid), **TIM** (postpaid/control/prepaid). Vivo sheet verified: Postpaid 150→215, Control 59→110, Digital 30→50, Prepaid 17→30, streaming + notes populated.
+- **Tests 35 → 40:** one-sheet-per-present-carrier (TIM absent → no sheet), blocks grouped-in-order + price-sorted, only that carrier's plans, the 8-column set + promo/data formatting, write_workbook emits carrier sheets without disturbing the others. All offline.
+- **Review workbook left at `data/mobile_plans.xlsx` (uncommitted)** — open the Vivo/Claro/TIM tabs. **First cut — expect iteration.** CONTEXT → **v0.3.3**.
+- **Next (Architect):** react to the by-operator + comparison layouts; then the **daily GitHub Actions job** (committed history) and the promotions-over-time view / dashboard.

@@ -180,6 +180,88 @@ def _write_comparison(xl, latest: pd.DataFrame):
         ws.column_dimensions[get_column_letter(col)].width = w
 
 
+OPERATOR_DISPLAY = {"vivo": "Vivo", "claro": "Claro", "tim": "TIM"}
+# category blocks within each operator sheet, in display order
+OPERATOR_CATEGORY_ORDER = [
+    ("Postpaid", ["postpaid"]),
+    ("Control", ["control"]),
+    ("Digital", ["lite", "flex"]),
+    ("Prepaid", ["prepaid"]),
+]
+OPERATOR_COLUMNS = ["Plan", "Price R$", "Promo R$", "Data", "Voice",
+                    "Unlimited apps", "Streaming", "Notes"]
+
+
+def _s(v) -> str | None:
+    """A non-empty string, else None (so blank cells stay blank)."""
+    return v if isinstance(v, str) and v.strip() else None
+
+
+def _operator_plan_row(p) -> list:
+    """One readable catalog row from a latest-snapshot record (itertuples)."""
+    data = f"{p.data_gb:g} GB" if pd.notna(p.data_gb) else ""
+    dnote = _s(p.data_note)
+    if dnote:
+        data = f"{data} ({dnote})" if data else dnote
+    notes = " · ".join(x for x in (_s(p.extra_benefits), _s(p.price_note)) if x) or None
+    return [
+        p.plan_name,
+        float(p.price_brl) if pd.notna(p.price_brl) else None,
+        float(p.price_promo_brl) if pd.notna(p.price_promo_brl) else None,
+        data or None,
+        _s(p.voice),
+        _s(p.unlimited_apps),
+        _s(p.streaming),
+        notes,
+    ]
+
+
+def build_operator_sheets(latest: pd.DataFrame) -> list[dict]:
+    """Pure: latest snapshot → one structure per carrier present (category blocks, price-sorted).
+    Carriers not in the snapshot get no sheet. Offline-testable."""
+    present = set(latest["carrier"].dropna())
+    ordered = [c for c in COMPARE_CARRIERS if c in present]
+    ordered += [c for c in latest["carrier"].dropna().unique() if c not in ordered]  # future carriers
+    out = []
+    for carrier in ordered:
+        blocks = []
+        for label, cats in OPERATOR_CATEGORY_ORDER:
+            df = latest[(latest["carrier"] == carrier) & (latest["category"].isin(cats))]
+            df = df.dropna(subset=["price_brl"]).sort_values("price_brl", kind="stable")
+            rows = [_operator_plan_row(p) for p in df.itertuples(index=False)]
+            if rows:
+                blocks.append({"label": label, "rows": rows})
+        if blocks:
+            out.append({"carrier": carrier,
+                        "display": OPERATOR_DISPLAY.get(carrier, str(carrier).title()),
+                        "blocks": blocks})
+    return out
+
+
+def _write_operator_sheets(xl, latest: pd.DataFrame):
+    """One sheet per carrier: plans grouped by category (bold sub-header), price-sorted."""
+    for op in build_operator_sheets(latest):
+        ws = xl.book.create_sheet(op["display"])
+        ws.freeze_panes = "A2"
+        for j, h in enumerate(OPERATOR_COLUMNS, start=1):
+            cell = ws.cell(row=1, column=j, value=h)
+            cell.font = HEADER_FONT
+            cell.fill = HEADER_FILL
+        r = 2
+        for block in op["blocks"]:
+            ws.cell(row=r, column=1, value=block["label"]).font = Font(name=FONT, bold=True, color="1F3864")
+            r += 1
+            for row in block["rows"]:
+                for j, val in enumerate(row, start=1):
+                    cell = ws.cell(row=r, column=j, value=val)
+                    cell.font = Font(name=FONT)
+                    if j in (2, 3):  # Price R$, Promo R$
+                        cell.number_format = CURRENCY_FMT
+                r += 1
+        for col, w in {1: 32, 2: 11, 3: 11, 4: 22, 5: 20, 6: 18, 7: 18, 8: 40}.items():
+            ws.column_dimensions[get_column_letter(col)].width = w
+
+
 def write_workbook(plans, path: str | Path, run_ts: datetime) -> dict:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -209,7 +291,8 @@ def write_workbook(plans, path: str | Path, run_ts: datetime) -> dict:
         _format_sheet(xl.sheets["latest"], cur_cols, num_cols)
         _format_sheet(xl.sheets["changes"], (7, 8, 9))
         _write_summary(xl, run_ts, latest_date, len(latest), history["snapshot_date"].nunique())
-        _write_comparison(xl, latest)   # cross-operator comparison, rebuilt from the latest snapshot
+        _write_comparison(xl, latest)        # cross-operator comparison, from the latest snapshot
+        _write_operator_sheets(xl, latest)   # one tab per carrier (by-operator catalog view)
 
     return {
         "path": str(path),
