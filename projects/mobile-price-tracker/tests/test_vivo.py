@@ -66,3 +66,33 @@ def test_plan_id_native_offer_code():
     assert len({p.plan_id for p in plans}) == len(plans)        # unique per card
     amazon = next(p for p in plans if "Amazon" in p.plan_name)
     assert amazon.plan_id.startswith(("vivo:VIV", "vivo:SELF"))  # native offer code
+
+
+PREPAID_FIXTURE = Path(__file__).parent / "fixtures" / "vivo_prepaid_sp.html"
+
+
+def test_prepaid_tiers_are_distinct():
+    # All 4 prepaid tiers share ONE page-level offer code + the name "Vivo Pré"; the data allowance
+    # (non-price) must keep them distinct so none collapse.
+    t = Target(carrier="vivo", render="aem", category="prepaid", category_label="Pré-pago",
+               state="SP", url="https://vivo.com.br/.../pre-pago/vivo-pre")
+    plans = parse_vivo_html(PREPAID_FIXTURE.read_text(encoding="utf-8"), t, raw_ref="fx")
+    assert len(plans) == 4
+    assert len({p.plan_id for p in plans}) == 4                 # not collapsed
+    assert all(p.plan_id.startswith("vivo:VIV") for p in plans)
+    assert sorted(int(p.data_gb) for p in plans) == [4, 5, 9, 25]
+
+
+def test_promo_captured_from_struck_price():
+    # a struck-through original price (.unique-card__price-old) → regular vs. effective
+    html = ('<div class="unique-card"><div class="unique-card__plan">Vivo Pós Teste</div>'
+            '<div class="unique-card__header-benefit">50 GB</div>'
+            '<div class="unique-card__price-old">R$ 200</div>'
+            '<div class="total-card-price-value">150</div>'
+            ' oferta VIV202600099999</div>')
+    t = Target(carrier="vivo", render="aem", category="postpaid", category_label="Pós-pago",
+               state="SP", url="u")
+    p = parse_vivo_html(html, t)[0]
+    assert p.price_brl == 200.0          # regular (struck-through)
+    assert p.price_promo_brl == 150.0    # effective/discounted
+    assert p.price_note

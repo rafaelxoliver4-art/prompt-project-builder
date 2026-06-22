@@ -67,6 +67,13 @@ def _clean(text: str | None) -> str:
     return " ".join(text.split()) if text else ""
 
 
+def _txt(x) -> str:
+    """Storyblok fields are sometimes ``{"value": …}`` wrappers, sometimes bare strings."""
+    if isinstance(x, dict):
+        return x.get("value") or ""
+    return x if isinstance(x, str) else ""
+
+
 def parse_next_data(data: dict, target: Target, raw_ref: str | None = None) -> list[Plan]:
     """Pure mapping: ``__NEXT_DATA__`` dict → list[Plan]. No network, no I/O — unit-testable."""
     dc = data.get("props", {}).get("pageProps", {}).get("dynamicComponents", {}) or {}
@@ -140,6 +147,46 @@ def parse_next_data(data: dict, target: Target, raw_ref: str | None = None) -> l
     return plans
 
 
+def parse_claro_prepaid(data: dict, target: Target, raw_ref: str | None = None) -> list[Plan]:
+    """Claro prepaid (Prezão) uses ``tab_select`` tabs, NOT ``card_360`` (CONTEXT §3). Each Prezão
+    tab carries a daily-price offer ("Prezão R$1 por dia") + a data allowance in its title/content.
+    We capture the Prezão offer(s); the recarga tiers (R$15/20/25/30) are top-up amounts of the same
+    offer, so they are recorded in price_note rather than as separate plans."""
+    dc = data.get("props", {}).get("pageProps", {}).get("dynamicComponents", {}) or {}
+    plans: list[Plan] = []
+    seen: set[str] = set()
+    for comp in (dc.get("body", []) or []):
+        if not isinstance(comp, dict) or comp.get("component") != "tab_select":
+            continue
+        for tab in (comp.get("data", {}) or {}).get("data", []) or []:
+            if not isinstance(tab, dict):
+                continue
+            title = _clean(_txt(tab.get("title")))
+            if "prez" not in title.lower():          # only the Prezão tabs are real prepaid plans
+                continue
+            blob = title + " " + json.dumps(tab.get("content"), ensure_ascii=False)
+            dm = re.search(r"R\$\s*(\d+)\s*por\s*dia", blob, re.I)
+            price = float(dm.group(1)) if dm else None
+            if price is None:                        # no daily price → not a usable plan row
+                continue
+            gbm = _GB.search(blob)
+            data_gb = float(gbm.group(1)) if gbm else None
+            plan_id = f"claro:{slugify(title)}"      # no native slug on this layout → deterministic
+            if plan_id in seen:
+                continue
+            seen.add(plan_id)
+            plans.append(BaseAdapter.make_plan(
+                target,
+                plan_name=title,
+                plan_id=plan_id,
+                price_brl=price,
+                data_gb=data_gb,
+                price_note="prepaid Prezão — preço por dia; recargas a partir de R$15",
+                raw_ref=raw_ref,
+            ))
+    return plans
+
+
 class ClaroAdapter(BaseAdapter):
     carrier = "claro"
 
@@ -171,7 +218,9 @@ class ClaroAdapter(BaseAdapter):
                                f"(page may be blocked or restructured)")
         raw = node.text()
         raw_ref = self._save_raw(target, raw)
-        return parse_next_data(json.loads(raw), target, raw_ref=raw_ref)
+        # prepaid (Prezão) has a different page layout (tab_select, not card_360) → dedicated parser.
+        parser = parse_claro_prepaid if target.category == "prepaid" else parse_next_data
+        return parser(json.loads(raw), target, raw_ref=raw_ref)
 
     def _save_raw(self, target: Target, text: str) -> str:
         d = Path(self.settings.raw_capture_dir)

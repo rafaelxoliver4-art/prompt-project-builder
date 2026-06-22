@@ -103,3 +103,21 @@ def test_plan_id_native_slug_and_unique():
     ids = [p.plan_id for p in plans]
     assert len(ids) == len(set(ids))                  # never price-derived; unique
     assert any("plano-pos-60gb" in p.plan_id for p in plans)
+
+
+def test_prepaid_prezao_captured():
+    # Claro prepaid uses tab_select (not card_360) → dedicated parse_claro_prepaid.
+    import json
+    from mobile_tracker.adapters.claro import parse_claro_prepaid
+    fixture = Path(__file__).parent / "fixtures" / "claro_prepaid_sp.json"
+    data = json.loads(fixture.read_text(encoding="utf-8"))
+    t = Target(carrier="claro", render="nextjs", category="prepaid", category_label="Prezão (Pré)",
+               state="SP", url="https://www.claro.com.br/celular/planos-pre/prezao")
+    plans = parse_claro_prepaid(data, t, raw_ref="fx")
+    assert len(plans) >= 1
+    prez = plans[0]
+    assert "prez" in prez.plan_name.lower()
+    assert prez.price_brl and prez.price_brl > 0
+    assert prez.data_gb == 12.0
+    assert prez.category == "prepaid"
+    assert prez.plan_id.startswith("claro:")

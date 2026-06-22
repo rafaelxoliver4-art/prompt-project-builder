@@ -113,8 +113,15 @@ def parse_tim_html(html: str, target: Target, raw_ref: str | None = None) -> lis
         if plan_id in seen:
             continue
         seen.add(plan_id)
+        # promo: field_preco_adicional_tracejado is the struck-through regular price (empty when none)
+        regular = _price_brl(_field(o, "field_preco_adicional_tracejado"))
+        if regular and regular != price:
+            price_brl, price_promo, note = regular, price, "oferta com desconto"
+        else:
+            price_brl, price_promo, note = price, None, None
         plans.append(BaseAdapter.make_plan(
-            target, plan_name=name, plan_id=plan_id, price_brl=price, data_gb=data_gb, raw_ref=raw_ref))
+            target, plan_name=name, plan_id=plan_id, price_brl=price_brl,
+            price_promo_brl=price_promo, price_note=note, data_gb=data_gb, raw_ref=raw_ref))
     return plans
 
 

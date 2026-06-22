@@ -68,12 +68,25 @@ def parse_vivo_html(html: str, target: Target, raw_ref: str | None = None) -> li
         if not name or price is None:
             continue
 
-        code = _VIV.search(card.html or "") or _SELF.search(card.html or "")
-        plan_id = f"vivo:{code.group(0)}" if code else f"vivo:{slugify(name)}"
-
         ben = card.css_first(".unique-card__header-benefit")
         gb = _GB.search(ben.text()) if ben is not None else None
         data_gb = float(gb.group(1)) if gb else None
+
+        # plan_id = native offer code + data allowance. Prepaid tiers share ONE page-level code
+        # (e.g. VIV…22379), so the data amount (non-price) disambiguates them; for postpaid the code
+        # is already unique per card and the suffix is harmless.
+        code = _VIV.search(card.html or "") or _SELF.search(card.html or "")
+        base = code.group(0) if code else slugify(name)
+        gbtok = f"{int(data_gb)}gb" if data_gb else "x"
+        plan_id = f"vivo:{base}-{gbtok}"
+
+        # promo: a struck-through original price in .unique-card__price-old (hidden when no promo)
+        old_el = card.css_first(".unique-card__price-old")
+        old = _price_from(old_el.text()) if old_el is not None else None
+        if old and old != price:
+            price_brl, price_promo = old, price       # regular vs. effective (discounted)
+        else:
+            price_brl, price_promo = price, None
 
         switch = card.css_first(".unique-card__switch-list")
         data_note = _clean(switch.text()) if switch is not None else None
@@ -94,7 +107,9 @@ def parse_vivo_html(html: str, target: Target, raw_ref: str | None = None) -> li
             target,
             plan_name=name,
             plan_id=plan_id,
-            price_brl=price,
+            price_brl=price_brl,
+            price_promo_brl=price_promo,
+            price_note=("oferta com desconto" if price_promo else None),
             data_gb=data_gb,
             data_note=data_note,
             streaming=streaming,
