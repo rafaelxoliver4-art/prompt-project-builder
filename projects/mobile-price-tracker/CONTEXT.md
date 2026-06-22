@@ -1,6 +1,6 @@
 # CONTEXT — Mobile Price Tracker
 
-> **Version:** 0.4.3 · **Last updated:** 2026-06-22 · Content decided by the Architect; written by Code.
+> **Version:** 0.4.4 · **Last updated:** 2026-06-22 · Content decided by the Architect; written by Code.
 > The *what / how / why* of this project and every decision behind it. This is the knowledge base and
 > IP. If someone read only this file, they should understand the project well enough to rebuild it.
 > **Standing rule (Bridge):** every CODE TASK ends by updating this file (durable knowledge) AND
@@ -170,6 +170,17 @@ Python 3.11+ · `playwright` (headless Chromium, JS rendering) · `httpx` (fast 
 - **Working-copy note:** `data/mobile_plans.xlsx` is now **owned by the daily job**. Don't hand-commit local review-run changes to it — `git checkout` it (or let the job own it); `git pull` before working to get the latest committed snapshot.
 - **Drive mirror:** still a fast-follow (GOVERNANCE §5) — an `rclone` step is stubbed (commented) in the workflow, pending a Bridge YES + an `RCLONE_CONFIG` secret.
 
+#### Production-readiness verified (2026-06-22, CODE TASK #14)
+
+Audited (not assumed) that the daily job will fire correctly from **`origin/main`** — **all checks PASS**:
+- **Sync:** tree clean; `HEAD == origin/main`; no unpushed commits (the run uses the current code).
+- **Workflow on `origin/main`:** cron `0 21 * * *` (18:00 BRT), `workflow_dispatch`, `permissions: contents: write`, `pip install -e .` + `playwright install --with-deps chromium`, `python -m mobile_tracker.main` (no `PYTHONPATH`), commit-back, weekly-Monday backup; the rclone/Drive step is **commented** (can't fail the run). Default branch = **`main`** (cron fires from it).
+- **Enabled:** workflow **active** (id `300305398`).
+- **Code current:** 52 tests pass; `pyproject` editable-install config present; the matrix/chart/operator/Ranking code is on `origin/main` → the run produces the current styled matrix+charts workbook.
+- **End-to-end proof:** a manual `workflow_dispatch` **succeeded** (2m29s) — scraped **all three** carriers (claro 14 / tim 15 / vivo 23 = **52**), **no block/CAPTCHA/zero**; committed **51 in latest, 1 snapshot** (idempotent replace confirmed *on the runner*); pulled workbook has 9 sheets (matrix + 4 charts + Ranking + per-operator), styling applied, history not duplicated.
+- **Bottom line:** **the cron will fire at 18:00 BRT (21:00 UTC) today** from `main` — workflow enabled, latest code live, idempotent.
+- **Open item:** no live-output *sanity* check yet beyond the zero-guard — a carrier returning *implausible* counts/ranges (but non-zero) wouldn't be flagged. A range/sanity guard is possible future hardening.
+
 #### Current working environment (2026-06-19) — consolidated to ONE machine
 
 - **Bridge clarification (2026-06-19):** there is only **one** working machine — **this** one (user `Rafael`, Windows 11 Pro, **Python 3.13.14**). The machine-#1/#2 "transfer" track is set aside; the two subsections below are kept as **historical record**, not current state. A future PC migration (when Rafael changes computers) will go through GitHub (`git clone`) per the "Backups & machine transfer" bootstrap steps — not folder sync.
@@ -285,6 +296,7 @@ Spot-checked the `comparison` sheet against the carriers' official pages + indep
 4. **History horizon → keep ALL snapshots forever (default).** Rows are tiny; revisit roll-ups only if the file grows unwieldy.
 
 ## 11. Changelog
+- **0.4.4 — 2026-06-22** — CODE TASK #14: **production-readiness audit (verification only)** — confirmed the daily 18:00 BRT job will fire correctly from `origin/main`. §5 "Production-readiness verified" note: sync clean, workflow on main with correct config + active (id 300305398), 52 tests green, current matrix/chart code live, and a **manual run succeeded** (52 plans: claro 14 / tim 15 / vivo 23, no block, 1 snapshot — idempotent on the runner; committed 9-sheet styled matrix+charts workbook). Open item logged: no live-output range/sanity check beyond the zero-guard. No code changes.
 - **0.4.3 — 2026-06-22** — CODE TASK #13: added **four per-category line charts** (Control/Post/Pre/Digital) in a 2×2 block atop the `comparison` sheet — price over time, TIM/Vivo/Claro palette-colored series, reading from the evolution matrix (→ history), so they grow into trend lines as daily history accumulates. openpyxl native `LineChart`; matrix moved below the chart block; everything else (matrix formulas, Ranking, idempotency) intact. Tests 51 → 52.
 - **0.4.2 — 2026-06-22** — CODE TASK #12: **comparison sheet restructured into the price-evolution MATRIX** — Date × (category × carrier), every cell a **live `_xlfn.MINIFS` formula over `history`** (cheapest per carrier/category/date), per-group heatmap color-scale; the validated rank-aligned cross-section preserved on a new **`Ranking`** sheet. Also **fixed same-day idempotency** in `_merge_history` (a re-run of a date now *replaces* that date's rows instead of unioning — kills the local re-run inflation Code flagged). Pre = recharge amount (pending validity-days for true R$/day); monthly roll-up is the planned next step. §7 documents the matrix; §8 keeps the prepaid-normalization + value-lens refinements. Tests 45 → 51.
 - **0.4.1 — 2026-06-22** — CODE TASK #11: **visual polish pass** (presentation only — no data/adapter/schema changes). House style applied in `excel_writer.py` so the daily job reproduces it: gridlines off on every sheet, navy header + thin border, row banding, branded tab colors, carrier-sheet sub-header accents; conditional formatting — comparison color-grades the R$ columns + highlights the cheapest carrier per rank, latest/carrier sheets color-scale price per block, promo cells amber-accented. **No buttons/macros/.xlsm** (Bridge's call). §7 documents the design system; §8 adds the price-validation note + comparison refinements (fidelity vs boleto, GB definition, prepaid monthly normalization, R$/GB lens). Tests 40 → 45.

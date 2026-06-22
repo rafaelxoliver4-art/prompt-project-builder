@@ -231,3 +231,15 @@ Machine #2 sent three open questions to the still-running machine #1 Code instan
 - **Tests 51 → 52:** 4 LineChart parts on comparison, 3 series each referencing the matrix columns + Date, palette colors; existing matrix/Ranking/idempotency tests updated for the new matrix row offset and green. CONTEXT → **v0.4.3**.
 - **Review copy** left at `data/mobile_plans.xlsx` (uncommitted); committed copy gets charts from the next 18:00 BRT run. Not committed.
 - **Next (Architect):** monthly roll-up of the matrix/charts (Figure-5); value-lens/fidelity refinements; optional CI headless-recalc for GitHub-previewable charts; Drive mirror.
+
+### 2026-06-22 — CODE TASK #14: production-readiness audit — set for 18:00 BRT ✅ (Code)
+- Verification only (no code changes). Confirmed against the **remote** state (the runner uses `origin/main`, not local).
+- **A. Sync — PASS:** tree clean; `HEAD == origin/main == 3d4f0ef`; **no unpushed commits**.
+- **B. Workflow config — PASS:** file on `origin/main` (94 lines) with cron `0 21 * * *` (18:00 BRT), `workflow_dispatch`, `contents: write`, `pip install -e .` + `playwright install --with-deps chromium`, `python -m mobile_tracker.main` (no PYTHONPATH), commit-back, weekly-Monday backup; rclone/Drive step commented (won't fail). Default branch = `main`.
+- **C. Enabled — PASS:** `gh workflow list` → **active** (id 300305398); prior run succeeded; no cron run yet today (before 21:00 UTC — expected).
+- **D. Code current — PASS:** `pytest` → **52 passed**; pyproject editable-install config present; matrix/chart/operator/Ranking functions all on `origin/main`.
+- **E. End-to-end proof — PASS:** manual `gh workflow run` → **success in 2m29s**. **Collected 52** (claro 14 / tim 15 / vivo 23), all three scraped, **no block/CAPTCHA/zero**. Committed **51 in latest, 1 snapshot** — idempotent replace confirmed *on the runner* (didn't duplicate today's date). Pulled workbook: 9 sheets, comparison = live-MINIFS matrix + 4 charts, Ranking + per-operator, gridlines off; weekly backup refreshed.
+- **BOTTOM LINE: YES — the cron will fire at 18:00 BRT (21:00 UTC) today from `main`**, workflow enabled, latest code live, manual run succeeded with full counts, history idempotent.
+- **Open item:** no live-output *sanity* check yet beyond the zero-guard (implausible-but-non-zero counts/ranges wouldn't alert) — possible future hardening. CONTEXT → **v0.4.4**.
+- *(Audit-tooling note: `gh` reads its keyring only from the Bash shell in this dev env, not PowerShell — gh checks were run via Bash; the `revision:path` arg also needs PowerShell to avoid MSYS mangling. Neither affects CI.)*
+- **Next (Architect):** with the pipeline + scheduler proven, the open product items — monthly roll-up, value-lens/fidelity, Drive mirror, optional live-output sanity guard.
