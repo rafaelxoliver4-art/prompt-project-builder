@@ -48,7 +48,7 @@ RIGHT = Alignment(horizontal="right")
 # tab colors per sheet (engine/flat sheets neutral grey; views + carriers branded)
 TAB_COLORS = {
     "Vivo": "660099", "Claro": "DA291C", "TIM": "0033A0",
-    "comparison": "2E7D32", "summary": "102A43",
+    "comparison": "2E7D32", "Ranking": "1565C0", "summary": "102A43",
     "history": "8A8A8A", "latest": "8A8A8A", "changes": "8A8A8A",
 }
 
@@ -96,6 +96,12 @@ def _df(plans) -> pd.DataFrame:
 
 
 def _merge_history(existing: pd.DataFrame, fresh: pd.DataFrame) -> pd.DataFrame:
+    # A re-run of a snapshot_date REPLACES that date's rows (idempotent per date): `fresh` fully owns
+    # the date(s) it carries, so a same-day re-run / double-fire can't union-inflate a date. Other
+    # dates accumulate untouched (append-only across days; CONTEXT §4).
+    if not fresh.empty and "snapshot_date" in existing.columns and not existing.empty:
+        fresh_dates = set(fresh["snapshot_date"].dropna().unique())
+        existing = existing[~existing["snapshot_date"].isin(fresh_dates)]
     df = pd.concat([existing, fresh], ignore_index=True)
     df = _with_key(df)
     df = df.drop_duplicates(subset=["snapshot_date", "carrier", "state", "_key"], keep="last")
@@ -195,13 +201,14 @@ def build_comparison_data(latest: pd.DataFrame) -> list[dict]:
     return out
 
 
-def _write_comparison(xl, latest: pd.DataFrame):
-    """Render the `comparison` sheet: four groups, each rank-aligned across Vivo/Claro/TIM."""
-    ws = xl.book.create_sheet("comparison")
-    _gridless(ws, TAB_COLORS["comparison"])
+def _write_ranking(xl, latest: pd.DataFrame):
+    """Render the `Ranking` sheet: the validated cross-section — four groups, each rank-aligned
+    across Vivo/Claro/TIM by ascending price (today's snapshot)."""
+    ws = xl.book.create_sheet("Ranking")
+    _gridless(ws, TAB_COLORS["Ranking"])
     ws.freeze_panes = "A1"
     ws.cell(row=1, column=1,
-            value="Cross-operator comparison — within category, aligned by price rank") \
+            value="Ranking (today) — within category, aligned by price rank") \
         .font = Font(name=FONT, bold=True, size=14)
     headers = ["Rank", "Vivo R$", "Claro R$", "TIM R$", "Vivo plan", "Claro plan", "TIM plan"]
     r = 3
@@ -342,6 +349,104 @@ def _write_operator_sheets(xl, latest: pd.DataFrame):
             ws.column_dimensions[get_column_letter(col)].width = w
 
 
+# ---- price-evolution matrix (the `comparison` sheet) — CONTEXT §7 ----------------------------
+# (group title, category, kind). "single" = one category; "digital" = min over lite OR flex.
+EVOLUTION_GROUPS = [
+    ("Control (R$/mo)", "control", "single"),
+    ("Post (R$/mo)", "postpaid", "single"),
+    ("Pre (R$, recarga)", "prepaid", "single"),
+    ("Digital (R$/mo)", None, "digital"),
+]
+EVOLUTION_CARRIERS = ["tim", "vivo", "claro"]
+EVOLUTION_DISP = {"tim": "TIM", "vivo": "Vivo", "claro": "Claro"}
+
+
+def evolution_dates(history: pd.DataFrame) -> list[str]:
+    """Distinct snapshot_dates in history, chronological (oldest first). Offline-testable."""
+    if "snapshot_date" not in history.columns:
+        return []
+    return sorted({str(d) for d in history["snapshot_date"].dropna()})
+
+
+def _hist_cols():
+    return (get_column_letter(COLUMNS.index("price_brl") + 1),
+            get_column_letter(COLUMNS.index("carrier") + 1),
+            get_column_letter(COLUMNS.index("category") + 1),
+            get_column_letter(COLUMNS.index("snapshot_date") + 1))
+
+
+def _minifs(pc, cc, dc, sc, carrier, category, row):
+    """Cheapest price `carrier` offered in `category` on the date in $A{row}, over the history sheet."""
+    return (f'_xlfn.MINIFS(history!${pc}:${pc},'
+            f'history!${cc}:${cc},"{carrier}",'
+            f'history!${dc}:${dc},"{category}",'
+            f'history!${sc}:${sc},$A{row})')
+
+
+def _write_comparison(xl, history: pd.DataFrame):
+    """`comparison` = the price-evolution MATRIX: Date (rows) × category-group × carrier (cols).
+    Every value cell is a LIVE MINIFS formula over the `history` sheet, so the matrix fills in as
+    daily history accumulates (self-connected workbook). 0 (no match) → "" so the heatmap ignores it."""
+    ws = xl.book.create_sheet("comparison")
+    _gridless(ws, TAB_COLORS["comparison"])
+    pc, cc, dc, sc = _hist_cols()
+    ncol = 1 + 3 * len(EVOLUTION_GROUPS)
+    ws.cell(row=1, column=1, value="Price evolution — cheapest R$ per carrier × category, by date") \
+        .font = Font(name=FONT, bold=True, size=14)
+
+    HEAD1, HEAD2, FIRST = 3, 4, 5
+    ws.cell(row=HEAD1, column=1, value="Date")
+    ws.merge_cells(start_row=HEAD1, start_column=1, end_row=HEAD2, end_column=1)
+    for g, (title, _cat, _kind) in enumerate(EVOLUTION_GROUPS):
+        c0 = 2 + g * 3
+        ws.merge_cells(start_row=HEAD1, start_column=c0, end_row=HEAD1, end_column=c0 + 2)
+        ws.cell(row=HEAD1, column=c0, value=title)
+        for k, carrier in enumerate(EVOLUTION_CARRIERS):
+            ws.cell(row=HEAD2, column=c0 + k, value=EVOLUTION_DISP[carrier])
+    _house_header(ws, HEAD1, ncol)
+    _house_header(ws, HEAD2, ncol)
+    ws.cell(row=HEAD1, column=1).alignment = Alignment(vertical="center", horizontal="left")
+    for c in range(2, ncol + 1):
+        ws.cell(row=HEAD1, column=c).alignment = Alignment(vertical="center", horizontal="center")
+        ws.cell(row=HEAD2, column=c).alignment = Alignment(vertical="center", horizontal="center")
+
+    r = FIRST
+    for d in evolution_dates(history):
+        ws.cell(row=r, column=1, value=d).font = Font(name=FONT)
+        for g, (title, category, kind) in enumerate(EVOLUTION_GROUPS):
+            c0 = 2 + g * 3
+            for k, carrier in enumerate(EVOLUTION_CARRIERS):
+                if kind == "single":
+                    m = _minifs(pc, cc, dc, sc, carrier, category, r)
+                    formula = f'=IF({m}=0,"",{m})'
+                else:  # digital = min over lite OR flex; "" if the carrier has neither
+                    lite = _minifs(pc, cc, dc, sc, carrier, "lite", r)
+                    flex = _minifs(pc, cc, dc, sc, carrier, "flex", r)
+                    formula = f'=IFERROR(1/MAX(IFERROR(1/{lite},0),IFERROR(1/{flex},0)),"")'
+                cell = ws.cell(row=r, column=c0 + k, value=formula)
+                cell.number_format = CURRENCY_FMT
+                cell.font = Font(name=FONT)
+                cell.alignment = RIGHT
+        r += 1
+    last = r - 1
+
+    if last >= FIRST:                                  # per-group heatmap (green cheap → red dear)
+        for g in range(len(EVOLUTION_GROUPS)):
+            c0 = 2 + g * 3
+            rng = f"{get_column_letter(c0)}{FIRST}:{get_column_letter(c0 + 2)}{last}"
+            ws.conditional_formatting.add(rng, _price_scale())
+
+    note = ws.cell(row=last + 2, column=1,
+                   value="Pre = cheapest recharge amount captured (true R$/day needs validity-days we "
+                         "don't yet capture — CONTEXT §8). Digital = min of Vivo Lite / Claro Flex. "
+                         "Daily rows now; monthly roll-up is the planned next step.")
+    note.font = Font(name=FONT, italic=True, size=9, color="808080")
+    ws.freeze_panes = f"B{FIRST}"
+    ws.column_dimensions["A"].width = 13
+    for c in range(2, ncol + 1):
+        ws.column_dimensions[get_column_letter(c)].width = 10
+
+
 def write_workbook(plans, path: str | Path, run_ts: datetime) -> dict:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -379,7 +484,8 @@ def write_workbook(plans, path: str | Path, run_ts: datetime) -> dict:
                 f"{L}2:{L}{last}", FormulaRule(formula=[f"NOT(ISBLANK({L}2))"], fill=PROMO_FILL))
         _format_sheet(xl.sheets["changes"], (7, 8, 9), tab_color=TAB_COLORS["changes"])
         _write_summary(xl, run_ts, latest_date, len(latest), history["snapshot_date"].nunique())
-        _write_comparison(xl, latest)        # cross-operator comparison, from the latest snapshot
+        _write_comparison(xl, history)       # price-evolution matrix (live MINIFS over history)
+        _write_ranking(xl, latest)           # validated cross-section (rank-aligned, today)
         _write_operator_sheets(xl, latest)   # one tab per carrier (by-operator catalog view)
 
     return {
