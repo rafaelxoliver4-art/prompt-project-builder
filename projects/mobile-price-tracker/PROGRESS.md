@@ -243,3 +243,14 @@ Machine #2 sent three open questions to the still-running machine #1 Code instan
 - **Open item:** no live-output *sanity* check yet beyond the zero-guard (implausible-but-non-zero counts/ranges wouldn't alert) — possible future hardening. CONTEXT → **v0.4.4**.
 - *(Audit-tooling note: `gh` reads its keyring only from the Bash shell in this dev env, not PowerShell — gh checks were run via Bash; the `revision:path` arg also needs PowerShell to avoid MSYS mangling. Neither affects CI.)*
 - **Next (Architect):** with the pipeline + scheduler proven, the open product items — monthly roll-up, value-lens/fidelity, Drive mirror, optional live-output sanity guard.
+
+### 2026-06-22 — CODE TASK #15: daily price-change email alert (Code)
+- New module **`mobile_tracker/alerts.py`**: after each live run, a plan whose `price_brl` moves **≥3%** (up OR down) vs the previous snapshot → a **digest email** to rafaelxoliver4@gmail.com from ibotatom@gmail.com. Matched by **(carrier, state, plan_id)** — same identity as the `changes` sheet (they agree). New/removed plans are not price-move alerts.
+- **Functions:** `compute_price_alerts` (pure), `format_alert_email` (pure: subject + one line/plan sorted by |%| desc, with ▲/▼), `send_alert_email` (STARTTLS `smtp.gmail.com:587`), `alerts_from_workbook` (reads the workbook's last two snapshots). Wired into `main.py` after `write_workbook`, **live only**.
+- **Credential — secret ONLY:** the SMTP app-password is read solely from the **`EMAIL_APP_PASSWORD`** env var (a GitHub Actions Secret). **Never hardcoded/printed/committed** — verified no literal anywhere. The workflow passes `EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}` to the "Run tracker" step. Addresses + `threshold_pct: 3.0` live in `config/sources.yaml` (`alerts:` — non-secret; added `Settings.alerts`).
+- **Graceful degradation (collection > notification):** missing/empty password → log "skipping" + skip; SMTP failure → caught + logged; the whole alert block in `main.py` is wrapped so it can **never fail the scrape or block the data commit**. Console log lines are ASCII-safe (email body keeps the ≥/▲/▼ Unicode).
+- **First fire = NEXT run:** needs ≥2 snapshots, so the first alert compares the next daily run to today's.
+- **Tests 52 → 60:** rise ▲ / drop ▼ / <3% ignored / exactly-3% flagged / new+removed not flagged / matched-by-plan_id-not-name; subject+body format; **send skips without password**; **SMTP error caught** (no raise); `alerts_from_workbook` needs 2 snapshots. No real SMTP hit. CONTEXT → **v0.4.5**.
+- **HARD PRE-REQ for live alerts (Bridge):** add the `EMAIL_APP_PASSWORD` secret (Gmail app password for ibotatom@gmail.com) in repo → Settings → Secrets and variables → Actions. Until then the step skips gracefully.
+- No workbook/secret committed.
+- **Next (Architect):** monthly roll-up; value-lens/fidelity; Drive mirror; the live-output sanity guard.

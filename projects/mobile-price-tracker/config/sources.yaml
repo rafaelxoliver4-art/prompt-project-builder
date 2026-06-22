@@ -21,6 +21,17 @@ scraping:
   request_timeout_seconds: 30
   headless: true
 
+# Daily price-change email alert (≥ threshold_pct move, up or down, vs the previous snapshot).
+# NON-SECRET config only — the SMTP password is read from the EMAIL_APP_PASSWORD env var
+# (a GitHub Actions Secret), NEVER stored here or committed.
+alerts:
+  enabled: true
+  threshold_pct: 3.0
+  from_email: ibotatom@gmail.com
+  to_email: rafaelxoliver4@gmail.com
+  smtp_host: smtp.gmail.com
+  smtp_port: 587
+
 # Geography. SP only is active now; others are pre-listed but inactive.
 states:
   - code: SP

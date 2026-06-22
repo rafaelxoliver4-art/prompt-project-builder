@@ -63,6 +63,23 @@ def run(demo: bool = False, only: str | None = None) -> int:
         f"{result['changes']} change(s)."
     )
 
+    # Daily price-change email alert (live only). Fully guarded — alerts must NEVER fail the job or
+    # block the data commit (collection > notification). Needs >= 2 snapshots to fire.
+    acfg = settings.alerts
+    if not demo and acfg.get("enabled"):
+        try:
+            from . import alerts as _alerts
+            thr = float(acfg.get("threshold_pct", 3.0))
+            found, date = _alerts.alerts_from_workbook(settings.output_xlsx, thr)
+            if found:
+                subject, body = _alerts.format_alert_email(found, date, thr)
+                sent = _alerts.send_alert_email(acfg, subject, body)
+                print(f"alerts: {len(found)} change(s) >={thr:g}% - email {'sent' if sent else 'not sent'}")
+            else:
+                print(f"alerts: none >={thr:g}% (or <2 snapshots yet)")
+        except Exception as e:  # never let alerting break the run
+            print(f"alerts: error ({type(e).__name__}: {e}) - continuing")
+
     # In live mode, a carrier scraping zero is an alert condition (GOVERNANCE §6).
     if not demo:
         zero = [c for c in ("vivo", "claro", "tim") if per_carrier.get(c, 0) == 0]

@@ -41,6 +41,10 @@ class Settings:
     def scraping(self) -> dict:
         return self.raw.get("scraping", {})
 
+    @property
+    def alerts(self) -> dict:
+        return self.raw.get("alerts", {})
+
     def active_states(self) -> list[str]:
         return [s["code"] for s in self.raw.get("states", []) if s.get("active")]
 

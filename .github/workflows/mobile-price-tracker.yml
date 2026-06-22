@@ -43,6 +43,10 @@ jobs:
         run: pytest -q
 
       - name: Run tracker (all three carriers)
+        env:
+          # SMTP password for the ≥3% price-change email alert — from a GitHub Secret, never in code.
+          # If the secret is unset, the alert step skips gracefully (the scrape/commit still run).
+          EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
         run: |
           MODE="${{ github.event.inputs.mode || 'live' }}"
           if [ "$MODE" = "demo" ]; then

@@ -1,6 +1,6 @@
 # CONTEXT — Mobile Price Tracker
 
-> **Version:** 0.4.4 · **Last updated:** 2026-06-22 · Content decided by the Architect; written by Code.
+> **Version:** 0.4.5 · **Last updated:** 2026-06-22 · Content decided by the Architect; written by Code.
 > The *what / how / why* of this project and every decision behind it. This is the knowledge base and
 > IP. If someone read only this file, they should understand the project well enough to rebuild it.
 > **Standing rule (Bridge):** every CODE TASK ends by updating this file (durable knowledge) AND
@@ -24,6 +24,7 @@ plans and prices change over time.
 - **Geography:** **São Paulo (SP) first.** The design carries a `state` dimension from day one so other states can be switched on later by config, not rework.
 - **Cadence:** once per day at **18:00 BRT** (`0 21 * * *` UTC). **Live via GitHub Actions since 2026-06-22** — see §5.
 - **Output:** one Excel workbook, mirrored to GitHub + Google Drive.
+- **Alerting:** after each run, the job **emails a digest of any plan whose price moved ≥3%** (up or down) vs the previous snapshot (see §5).
 
 The exact source URLs live in [`config/sources.yaml`](config/sources.yaml) (single source of truth — don't hardcode them in code).
 
@@ -181,6 +182,16 @@ Audited (not assumed) that the daily job will fire correctly from **`origin/main
 - **Bottom line:** **the cron will fire at 18:00 BRT (21:00 UTC) today** from `main` — workflow enabled, latest code live, idempotent.
 - **Open item:** no live-output *sanity* check yet beyond the zero-guard — a carrier returning *implausible* counts/ranges (but non-zero) wouldn't be flagged. A range/sanity guard is possible future hardening.
 
+#### Price-change email alert — added (2026-06-22, CODE TASK #15)
+
+After each live run, the job emails **rafaelxoliver4@gmail.com** (from **ibotatom@gmail.com**) a **digest of any plan whose headline `price_brl` moved ≥ 3%** (up OR down) vs the previous snapshot — matched by `(carrier, state, plan_id)`, the same identity the `changes` sheet uses (so they agree). New/removed plans are **not** price-move alerts.
+- **Credential — secret only:** the SMTP app-password is read ONLY from the **`EMAIL_APP_PASSWORD`** env var (a **GitHub Actions Secret**) — never in code, config, or commits. The workflow passes `EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}` to the "Run tracker" step. Addresses + threshold live in `config/sources.yaml` (`alerts:` — non-secret).
+- **Send:** `smtplib` over STARTTLS (`smtp.gmail.com:587`); ONE digest if ≥1 alert, nothing if zero. Subject `"… N price change(s) ≥3% — <date>"`; one body line per plan, sorted by |%| desc.
+- **Robust — never blocks the job:** missing/empty password → log + skip; any SMTP error → caught + logged; the whole step is wrapped so it can't fail the scrape or the data commit (**collection > notification**).
+- **Code:** `mobile_tracker/alerts.py` (`compute_price_alerts` + `format_alert_email` pure; `send_alert_email` + `alerts_from_workbook` guarded), wired into `main.py` after `write_workbook` (live only).
+- **First fire = next run:** needs ≥2 snapshots, so the first alert compares the next run to today's.
+- **Pre-req (Bridge):** add the `EMAIL_APP_PASSWORD` secret (a Gmail app password for ibotatom@gmail.com) in repo → Settings → Secrets and variables → Actions. Until it's set, the alert step skips gracefully (scrape + commit still run).
+
 #### Current working environment (2026-06-19) — consolidated to ONE machine
 
 - **Bridge clarification (2026-06-19):** there is only **one** working machine — **this** one (user `Rafael`, Windows 11 Pro, **Python 3.13.14**). The machine-#1/#2 "transfer" track is set aside; the two subsections below are kept as **historical record**, not current state. A future PC migration (when Rafael changes computers) will go through GitHub (`git clone`) per the "Backups & machine transfer" bootstrap steps — not folder sync.
@@ -296,6 +307,7 @@ Spot-checked the `comparison` sheet against the carriers' official pages + indep
 4. **History horizon → keep ALL snapshots forever (default).** Rows are tiny; revisit roll-ups only if the file grows unwieldy.
 
 ## 11. Changelog
+- **0.4.5 — 2026-06-22** — CODE TASK #15: **daily price-change email alert**. New `mobile_tracker/alerts.py`: a plan whose `price_brl` moves **≥3%** (up/down) vs the previous snapshot (matched by `(carrier, state, plan_id)`, agreeing with the `changes` sheet) → ONE digest email to rafaelxoliver4@gmail.com from ibotatom@gmail.com via `smtplib`/STARTTLS. **Credential only from the `EMAIL_APP_PASSWORD` GitHub Secret** (never in code/config/commits); addresses + threshold in `config/sources.yaml` (`alerts:`). Wired into `main.py` (live only) **fully guarded** — missing password → skip, SMTP error → logged, never fails the scrape/commit. Workflow passes `EMAIL_APP_PASSWORD: ${{ secrets.* }}` to the run step. Console logs ASCII-safe. First fire needs ≥2 snapshots (next run vs today). §2 notes the alert; §5 documents it. Tests 52 → 60.
 - **0.4.4 — 2026-06-22** — CODE TASK #14: **production-readiness audit (verification only)** — confirmed the daily 18:00 BRT job will fire correctly from `origin/main`. §5 "Production-readiness verified" note: sync clean, workflow on main with correct config + active (id 300305398), 52 tests green, current matrix/chart code live, and a **manual run succeeded** (52 plans: claro 14 / tim 15 / vivo 23, no block, 1 snapshot — idempotent on the runner; committed 9-sheet styled matrix+charts workbook). Open item logged: no live-output range/sanity check beyond the zero-guard. No code changes.
 - **0.4.3 — 2026-06-22** — CODE TASK #13: added **four per-category line charts** (Control/Post/Pre/Digital) in a 2×2 block atop the `comparison` sheet — price over time, TIM/Vivo/Claro palette-colored series, reading from the evolution matrix (→ history), so they grow into trend lines as daily history accumulates. openpyxl native `LineChart`; matrix moved below the chart block; everything else (matrix formulas, Ranking, idempotency) intact. Tests 51 → 52.
 - **0.4.2 — 2026-06-22** — CODE TASK #12: **comparison sheet restructured into the price-evolution MATRIX** — Date × (category × carrier), every cell a **live `_xlfn.MINIFS` formula over `history`** (cheapest per carrier/category/date), per-group heatmap color-scale; the validated rank-aligned cross-section preserved on a new **`Ranking`** sheet. Also **fixed same-day idempotency** in `_merge_history` (a re-run of a date now *replaces* that date's rows instead of unioning — kills the local re-run inflation Code flagged). Pre = recharge amount (pending validity-days for true R$/day); monthly roll-up is the planned next step. §7 documents the matrix; §8 keeps the prepaid-normalization + value-lens refinements. Tests 45 → 51.
