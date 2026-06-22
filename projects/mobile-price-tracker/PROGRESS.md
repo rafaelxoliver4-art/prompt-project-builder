@@ -221,3 +221,13 @@ Machine #2 sent three open questions to the still-running machine #1 Code instan
 - **Tests 45 → 51:** matrix structure (Date + grouped TIM/Vivo/Claro), value cells are `MINIFS`/`history!` formulas, one row per distinct date, heatmap CF rule, `Ranking` preserved, `evolution_dates` helper, and same-day-replace idempotency. Existing tests green. CONTEXT → **v0.4.2**.
 - **Review workbook** left at `data/mobile_plans.xlsx` (uncommitted); committed copy gets the matrix from the next 18:00 BRT run. Not committed.
 - **Next (Architect):** the **monthly roll-up** of the matrix (rows = month) to match the Figure-5 reference once days accumulate; the value-lens/fidelity refinements; Drive mirror.
+
+### 2026-06-22 — CODE TASK #13: price-evolution line charts (Code)
+- Added **four per-category line charts** (Control / Post / Pre / Digital) in a **2×2 block at the top of the `comparison` sheet** (matrix moved below them, header now row 35). Presentation only — adapters/schema/scraping/data untouched.
+- **Each chart:** X-axis = the matrix Date column; **3 series = that group's TIM/Vivo/Claro matrix columns**, palette-matched line colors (TIM `#0033A0` / Vivo `#660099` / Claro `#DA291C`); markers on (so the single current point is visible); legend bottom; Y = "R$". Data references rebuilt **each run** to match the current date range (no stale/over-wide ranges).
+- **Self-connected:** charts read the matrix → matrix reads `history`, so they **auto-fill into trend lines** as the daily job adds dates. openpyxl native `LineChart` (no images/macros).
+- **Verified** (zip-inspected the chart XML, since openpyxl doesn't read charts back): 4 chart parts, each with 3 series referencing `'comparison'!$<col>` matrix columns + the `$A` Date column, and the palette line colors present.
+- **Sparsity note (expected):** history has ~1 date now → each series shows one marker until more days accrue. **Charts render values when opened in Excel** (recalcs the matrix formulas); a populated GitHub *preview* would need a headless-recalc step in CI (flagged, out of scope).
+- **Tests 51 → 52:** 4 LineChart parts on comparison, 3 series each referencing the matrix columns + Date, palette colors; existing matrix/Ranking/idempotency tests updated for the new matrix row offset and green. CONTEXT → **v0.4.3**.
+- **Review copy** left at `data/mobile_plans.xlsx` (uncommitted); committed copy gets charts from the next 18:00 BRT run. Not committed.
+- **Next (Architect):** monthly roll-up of the matrix/charts (Figure-5); value-lens/fidelity refinements; optional CI headless-recalc for GitHub-previewable charts; Drive mirror.

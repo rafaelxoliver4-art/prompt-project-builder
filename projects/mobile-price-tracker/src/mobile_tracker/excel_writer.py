@@ -14,6 +14,10 @@ from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
+from openpyxl.chart import LineChart, Reference
+from openpyxl.chart.marker import Marker
+from openpyxl.chart.shapes import GraphicalProperties
+from openpyxl.drawing.line import LineProperties
 from openpyxl.formatting.rule import ColorScaleRule, FormulaRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
@@ -359,6 +363,29 @@ EVOLUTION_GROUPS = [
 ]
 EVOLUTION_CARRIERS = ["tim", "vivo", "claro"]
 EVOLUTION_DISP = {"tim": "TIM", "vivo": "Vivo", "claro": "Claro"}
+CARRIER_LINE = {"tim": "0033A0", "vivo": "660099", "claro": "DA291C"}  # series colors = tab palette
+
+
+def _line_chart(ws, title, c0, head_row, first, last, anchor):
+    """One per-category line chart: X = Date column, 3 series = TIM/Vivo/Claro matrix columns.
+    Data references the live matrix (which reads history), so charts grow as history accumulates."""
+    chart = LineChart()
+    chart.title = title
+    chart.y_axis.title = "R$"
+    chart.x_axis.title = "Date"
+    chart.height, chart.width = 7.2, 11.5
+    chart.legend.position = "b"
+    data = Reference(ws, min_col=c0, max_col=c0 + 2, min_row=head_row, max_row=last)  # incl. names row
+    cats = Reference(ws, min_col=1, min_row=first, max_row=last)
+    chart.add_data(data, titles_from_data=True)
+    chart.set_categories(cats)
+    for s, carrier in zip(chart.series, EVOLUTION_CARRIERS):
+        s.graphicalProperties = GraphicalProperties()
+        s.graphicalProperties.line = LineProperties(solidFill=CARRIER_LINE[carrier], w=20000)
+        s.marker = Marker(symbol="circle", size=6)
+        s.smooth = False
+    ws.add_chart(chart, anchor)
+    return chart
 
 
 def evolution_dates(history: pd.DataFrame) -> list[str]:
@@ -394,7 +421,7 @@ def _write_comparison(xl, history: pd.DataFrame):
     ws.cell(row=1, column=1, value="Price evolution — cheapest R$ per carrier × category, by date") \
         .font = Font(name=FONT, bold=True, size=14)
 
-    HEAD1, HEAD2, FIRST = 3, 4, 5
+    HEAD1, HEAD2, FIRST = 35, 36, 37   # matrix sits BELOW the 2×2 line-chart block at the top
     ws.cell(row=HEAD1, column=1, value="Date")
     ws.merge_cells(start_row=HEAD1, start_column=1, end_row=HEAD2, end_column=1)
     for g, (title, _cat, _kind) in enumerate(EVOLUTION_GROUPS):
@@ -435,6 +462,11 @@ def _write_comparison(xl, history: pd.DataFrame):
             c0 = 2 + g * 3
             rng = f"{get_column_letter(c0)}{FIRST}:{get_column_letter(c0 + 2)}{last}"
             ws.conditional_formatting.add(rng, _price_scale())
+        # 4 per-category line charts in a 2×2 block at the top (price over time; matrix grows below)
+        anchors = ["A2", "J2", "A19", "J19"]
+        for g, (title, _c, _k) in enumerate(EVOLUTION_GROUPS):
+            _line_chart(ws, f"{title.split(' (')[0]} — cheapest R$ over time",
+                        2 + g * 3, HEAD2, FIRST, last, anchors[g])
 
     note = ws.cell(row=last + 2, column=1,
                    value="Pre = cheapest recharge amount captured (true R$/day needs validity-days we "
