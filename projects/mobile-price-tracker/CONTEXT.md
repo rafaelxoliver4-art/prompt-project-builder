@@ -1,6 +1,6 @@
 # CONTEXT — Mobile Price Tracker
 
-> **Version:** 0.3.1 · **Last updated:** 2026-06-22 · Content decided by the Architect; written by Code.
+> **Version:** 0.3.2 · **Last updated:** 2026-06-22 · Content decided by the Architect; written by Code.
 > The *what / how / why* of this project and every decision behind it. This is the knowledge base and
 > IP. If someone read only this file, they should understand the project well enough to rebuild it.
 > **Standing rule (Bridge):** every CODE TASK ends by updating this file (durable knowledge) AND
@@ -228,7 +228,7 @@ Nullable fields are expected to be sparse early — parsers improve over time. A
 - **`summary`** — run metadata + a few KPIs (plan counts per carrier, min/avg/max price) using Excel formulas.
 
 > **BACKLOG (deferred, per §10.1 — presentation comes AFTER data correctness & coverage):** the interim function-sheets stay until the pipeline is proven across all three carriers. **Data quality first, presentation second.** Deferred product items (Bridge, 2026-06-19):
-> 1. **Per-operator organization** — one sheet per carrier (vivo/claro/tim) **plus** a cross-operator **"comparable plans"** sheet that aligns plans by data/price tier across carriers.
+> 1. **Per-operator organization** — the cross-operator **"comparable plans"** sheet is **built (#9 — see "Comparison methodology" below)**; the per-carrier single-sheets (one tab per vivo/claro/tim) remain deferred.
 > 2. **PROMOTIONS view/sheet** — track promo-vs-regular price over time (we already capture `price_promo_brl` + `price_note`; surface the spread and its history).
 > 3. **DASHBOARD** — an attractive, formatted sheet (charts, headline KPIs, buttons/filters).
 >
@@ -238,7 +238,7 @@ Nullable fields are expected to be sparse early — parsers improve over time. A
 > - **Promo coverage** — *wired for all three carriers (#7);* few promos are live now, so coverage is low — revisit if a campaign adds many.
 > - **TIM "Pro Express" data_gb** — left null (allowance absent from structured fields, §3); revisit if TIM exposes it.
 
-> **Ideas / parking lot (not yet scheduled):** **Comparison methodology** (Bridge, 2026-06-19) for the future cross-operator "comparable plans" view — compare **like-for-like WITHIN each category** (pure postpaid, control/hybrid, prepaid, digital = Vivo Lite / Claro Flex), aligned **by price rank**: sort each carrier's plans in a category ascending by price, then align across carriers by rank (cheapest-vs-cheapest, 2nd-vs-2nd, …). Parked idea, not scheduled — revisit when the per-operator / comparison sheets are built.
+> **Comparison methodology — IMPLEMENTED (#9, 2026-06-22):** the **`comparison`** sheet compares like-for-like WITHIN each category, aligned by **price rank**. Groups → `category`: **Pure Postpaid**=`postpaid`, **Control / Hybrid**=`control`, **Prepaid**=`prepaid`, **Digital**={`lite`,`flex`} (Vivo Lite + Claro Flex; TIM none). Each carrier's plans are sorted ascending by `price_brl`, then aligned across carriers by rank (cheapest-vs-cheapest, 2nd-vs-2nd, …); `price_promo_brl` is shown alongside when present (**not** re-ranked by it). Layout per group: a bold title, an optional caveat note, then `Rank | Vivo R$ | Claro R$ | TIM R$ | Vivo plan | Claro plan | TIM plan` (the three R$ columns adjacent so a row compares across carriers; plan cells include GB). **Caveats printed in the sheet:** prepaid isn't a clean unit (Claro Prezão is a daily fee R$1/dia vs Vivo/TIM recharge amounts); Digital = Vivo Lite + Claro Flex (TIM none). Rebuilt from the **latest snapshot** every run (`build_comparison_data` + `_write_comparison` in `excel_writer.py`). First cut — expect layout iteration from Bridge review.
 
 ## 8. Known challenges / risks
 
@@ -260,6 +260,7 @@ Nullable fields are expected to be sparse early — parsers improve over time. A
 4. **History horizon → keep ALL snapshots forever (default).** Rows are tiny; revisit roll-ups only if the file grows unwieldy.
 
 ## 11. Changelog
+- **0.3.2 — 2026-06-22** — CODE TASK #9: built the cross-operator **`comparison`** sheet (§7 methodology now implemented, moved from parking-lot). Four groups (Pure Postpaid / Control-Hybrid / Prepaid / Digital), each rank-aligned across Vivo/Claro/TIM by ascending `price_brl`, with the prepaid-unit + Digital caveats printed in-sheet. `excel_writer.py`: `build_comparison_data` (pure) + `_write_comparison`, wired after `latest`; history/latest/changes/summary untouched. Tests 30 → 35.
 - **0.3.1 — 2026-06-22** — CODE TASK #7 (data-quality gaps before launch): **Vivo prepaid** now keeps all 4 recharge tiers (they share one offer code → `plan_id` disambiguated by data allowance); **Claro prepaid** parser added (`parse_claro_prepaid` over the `tab_select` Prezão tabs); **promo prices** wired for all three carriers (Claro prefix / Vivo `price-old` / TIM `tracejado`); TIM "Pro Express" `data_gb` left null + documented. §3 records the prepaid structures + promo locations; §7 updated. Tests 27 → 30.
 - **0.3.0 — 2026-06-19** — CODE TASK #6 (schema change, Bridge-approved): added **`plan_id`** to the Plan schema (§6) and as the canonical key. §4 `[DECISION]` adopts (carrier, state, plan_id) for latest/history/changes (never price-derived). §3 documents per-carrier derivation: Claro slug, Vivo offer code (VIV…/SELF…), TIM Drupal `nid` (native), name-slug fallback. `excel_writer` re-keyed → duplicate-named plans (two Claro "Controle 30GB", two Vivo "Vivo Controle") now stay distinct in `latest`. Minor-version bump for the schema change.
 - **0.2.9 — 2026-06-19** — CODE TASK #5: TIM adapter (third/last stack — all three carriers now live). Added §3 "TIM — live structure verified": server-rendered Drupal, plain `httpx`; plans come from the embedded `drupal-settings-json` → `settings["ofertas"][]` (`field_preco_card_oferta` price + `title` name) — **SVG-price concern resolved, no OCR needed**; 15 live SP plans (control 5 / Black 7 / Pré 3), no Playwright. Parked the Bridge's cross-operator **comparison methodology** (within-category, by price rank) in §7.

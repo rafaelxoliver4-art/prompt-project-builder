@@ -14,11 +14,11 @@ def _plan(name, price, date):
     return p
 
 
-def test_creates_four_sheets(tmp_path):
+def test_creates_expected_sheets(tmp_path):
     out = tmp_path / "plans.xlsx"
     write_workbook([_plan("A", 50.0, "2026-06-10")], out, datetime(2026, 6, 10, 23))
     xls = pd.ExcelFile(out)
-    assert set(xls.sheet_names) == {"history", "latest", "changes", "summary"}
+    assert set(xls.sheet_names) == {"history", "latest", "changes", "summary", "comparison"}
 
 
 def test_history_is_append_only_and_changes_detected(tmp_path):

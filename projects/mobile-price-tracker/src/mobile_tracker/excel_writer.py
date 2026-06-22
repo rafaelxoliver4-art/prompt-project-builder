@@ -104,6 +104,82 @@ def _format_sheet(ws, currency_cols=(), number_cols=()):
                 c.number_format = "#,##0.##"
 
 
+COMPARE_CARRIERS = ["vivo", "claro", "tim"]
+# (group title, category values it spans, optional caveat note) — CONTEXT §7 methodology
+COMPARE_GROUPS = [
+    ("Pure Postpaid", ["postpaid"], None),
+    ("Control / Hybrid", ["control"], None),
+    ("Prepaid", ["prepaid"],
+     "Note: prepaid is not a clean unit — Claro Prezão is a daily fee (R$1/dia) vs Vivo/TIM recharge amounts."),
+    ("Digital", ["lite", "flex"],
+     "Digital = Vivo Lite + Claro Flex (TIM has no digital line)."),
+]
+
+
+def _ranked(latest: pd.DataFrame, cats, carrier: str):
+    df = latest[(latest["carrier"] == carrier) & (latest["category"].isin(cats))]
+    df = df.dropna(subset=["price_brl"]).sort_values("price_brl", kind="stable")
+    return list(df[["price_brl", "plan_name", "data_gb", "price_promo_brl"]]
+                .itertuples(index=False, name=None))
+
+
+def build_comparison_data(latest: pd.DataFrame) -> list[dict]:
+    """Pure: latest snapshot → per-group, per-carrier price-ranked plan lists (CONTEXT §7).
+    Each carrier's plans in a category are sorted ascending by price_brl, then aligned across
+    carriers by rank (cheapest-vs-cheapest, 2nd-vs-2nd, …). Offline-testable."""
+    out = []
+    for title, cats, note in COMPARE_GROUPS:
+        per = {c: _ranked(latest, cats, c) for c in COMPARE_CARRIERS}
+        out.append({
+            "title": title,
+            "note": note,
+            "per_carrier": per,
+            "max_rank": max((len(v) for v in per.values()), default=0),
+        })
+    return out
+
+
+def _write_comparison(xl, latest: pd.DataFrame):
+    """Render the `comparison` sheet: four groups, each rank-aligned across Vivo/Claro/TIM."""
+    ws = xl.book.create_sheet("comparison")
+    ws.freeze_panes = "A1"
+    ws.cell(row=1, column=1,
+            value="Cross-operator comparison — within category, aligned by price rank") \
+        .font = Font(name=FONT, bold=True, size=14)
+    r = 3
+    for grp in build_comparison_data(latest):
+        ws.cell(row=r, column=1, value=grp["title"]).font = Font(name=FONT, bold=True, size=12)
+        r += 1
+        if grp["note"]:
+            cell = ws.cell(row=r, column=1, value=grp["note"])
+            cell.font = Font(name=FONT, italic=True, size=9, color="808080")
+            r += 1
+        headers = ["Rank", "Vivo R$", "Claro R$", "TIM R$", "Vivo plan", "Claro plan", "TIM plan"]
+        for j, h in enumerate(headers, start=1):
+            cell = ws.cell(row=r, column=j, value=h)
+            cell.font = HEADER_FONT
+            cell.fill = HEADER_FILL
+        r += 1
+        per = grp["per_carrier"]
+        for rank in range(grp["max_rank"]):
+            ws.cell(row=r, column=1, value=rank + 1).font = Font(name=FONT)
+            for ci, carrier in enumerate(COMPARE_CARRIERS):
+                rows = per[carrier]
+                if rank < len(rows):
+                    price, name, gb, promo = rows[rank]
+                    pcell = ws.cell(row=r, column=2 + ci, value=float(price))
+                    pcell.number_format = CURRENCY_FMT
+                    pcell.font = Font(name=FONT)
+                    label = f"{name} ({int(gb)}GB)" if pd.notna(gb) else str(name)
+                    if pd.notna(promo):
+                        label += f" · promo R${float(promo):g}"
+                    ws.cell(row=r, column=5 + ci, value=label).font = Font(name=FONT)
+            r += 1
+        r += 1  # blank separator between groups
+    for col, w in {1: 6, 2: 11, 3: 11, 4: 11, 5: 32, 6: 32, 7: 32}.items():
+        ws.column_dimensions[get_column_letter(col)].width = w
+
+
 def write_workbook(plans, path: str | Path, run_ts: datetime) -> dict:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -133,6 +209,7 @@ def write_workbook(plans, path: str | Path, run_ts: datetime) -> dict:
         _format_sheet(xl.sheets["latest"], cur_cols, num_cols)
         _format_sheet(xl.sheets["changes"], (7, 8, 9))
         _write_summary(xl, run_ts, latest_date, len(latest), history["snapshot_date"].nunique())
+        _write_comparison(xl, latest)   # cross-operator comparison, rebuilt from the latest snapshot
 
     return {
         "path": str(path),
