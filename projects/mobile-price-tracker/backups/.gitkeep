@@ -1,0 +1,2 @@
+# Weekly frozen backups of data/mobile_plans.xlsx are committed here by the GitHub Actions job
+# (one dated file per Monday, never overwritten) — a human-readable restore point on top of git history.

@@ -1,0 +1,94 @@
+name: mobile-price-tracker
+
+# Daily unattended scrape (runs with your machine off): scrapes Vivo/Claro/TIM, writes the Excel
+# time-series, and commits it back to the repo — this IS the committed, append-only price history.
+# Schedule: 21:00 UTC == 18:00 BRT (UTC−3). Also runnable on demand via the "Run workflow" button.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "live (real scrape) or demo (sample data, for testing)"
+        type: choice
+        default: live
+        options: [live, demo]
+  schedule:
+    - cron: "0 21 * * *"   # 21:00 UTC == 18:00 BRT (UTC−3)
+
+permissions:
+  contents: write           # allow committing the updated workbook + weekly backup
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: projects/mobile-price-tracker
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e .                                  # editable install → `python -m` needs NO PYTHONPATH
+          python -m playwright install --with-deps chromium # --with-deps: headless Chromium libs (Vivo) on the runner
+
+      - name: Run tests (offline)
+        run: pytest -q
+
+      - name: Run tracker (all three carriers)
+        run: |
+          MODE="${{ github.event.inputs.mode || 'live' }}"
+          if [ "$MODE" = "demo" ]; then
+            python -m mobile_tracker.main --demo
+          else
+            python -m mobile_tracker.main
+          fi
+        # NOTE: main.py exits non-zero (alerts) if any carrier yields zero plans — a blocked carrier
+        # fails the job here, so the commit step below is skipped (no fake/partial commit; GOVERNANCE §6).
+
+      - name: Commit daily snapshot
+        working-directory: .
+        run: |
+          git config user.name  "mobile-price-tracker[bot]"
+          git config user.email "actions@github.com"
+          git add projects/mobile-price-tracker/data/mobile_plans.xlsx
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "chore(data): daily snapshot $(date -u +%F)"
+            git push
+          fi
+
+      - name: Weekly backup (Mondays, UTC)
+        working-directory: .
+        run: |
+          if [ "$(date -u +%u)" = "1" ]; then
+            mkdir -p projects/mobile-price-tracker/backups
+            cp projects/mobile-price-tracker/data/mobile_plans.xlsx \
+               "projects/mobile-price-tracker/backups/mobile_plans_$(date -u +%F).xlsx"
+            git add projects/mobile-price-tracker/backups/*.xlsx
+            if git diff --staged --quiet; then
+              echo "Weekly backup unchanged — nothing to commit."
+            else
+              git commit -m "chore(backup): weekly snapshot $(date -u +%F)"
+              git push
+            fi
+          else
+            echo "Not Monday (UTC weekday $(date -u +%u)) — skipping weekly backup."
+          fi
+
+      # OPTIONAL (fast follow, GOVERNANCE §5) — mirror the workbook to Google Drive via rclone.
+      # Needs a Bridge YES + an RCLONE_CONFIG GitHub Secret; left disabled this task.
+      # - name: Mirror to Google Drive (rclone)
+      #   working-directory: .
+      #   run: |
+      #     mkdir -p ~/.config/rclone
+      #     echo "${{ secrets.RCLONE_CONFIG }}" > ~/.config/rclone/rclone.conf
+      #     rclone copy projects/mobile-price-tracker/data/mobile_plans.xlsx gdrive:/mobile-price-tracker/
