@@ -1,6 +1,6 @@
 # CONTEXT — Mobile Price Tracker
 
-> **Version:** 0.3.3 · **Last updated:** 2026-06-22 · Content decided by the Architect; written by Code.
+> **Version:** 0.4.0 · **Last updated:** 2026-06-22 · Content decided by the Architect; written by Code.
 > The *what / how / why* of this project and every decision behind it. This is the knowledge base and
 > IP. If someone read only this file, they should understand the project well enough to rebuild it.
 > **Standing rule (Bridge):** every CODE TASK ends by updating this file (durable knowledge) AND
@@ -22,7 +22,7 @@ plans and prices change over time.
   - **Claro** — Pós, Controle, Flex, Pré (Prezão).
   - **TIM** — Pré-pago, Controle, Pós (TIM Black).
 - **Geography:** **São Paulo (SP) first.** The design carries a `state` dimension from day one so other states can be switched on later by config, not rework.
-- **Cadence:** once per day, end of day Brazil time (≈23:00 BRT → `0 2 * * *` UTC).
+- **Cadence:** once per day at **18:00 BRT** (`0 21 * * *` UTC). **Live via GitHub Actions since 2026-06-22** — see §5.
 - **Output:** one Excel workbook, mirrored to GitHub + Google Drive.
 
 The exact source URLs live in [`config/sources.yaml`](config/sources.yaml) (single source of truth — don't hardcode them in code).
@@ -157,9 +157,18 @@ Python 3.11+ · `playwright` (headless Chromium, JS rendering) · `httpx` (fast 
 ### Verified execution environment (2026-06-11, CODE TASK #2)
 
 - **Machine:** Windows 11 Pro (10.0.26200), Python **3.13.13**, venv at `projects/mobile-price-tracker/.venv/`, Playwright **Chromium installed**. Offline pipeline green here (6 tests, demo run, Excel-verified KPIs).
-- **Run quirk:** `python -m mobile_tracker.main` fails with `ModuleNotFoundError` unless `PYTHONPATH=src` is set — `pyproject.toml` wires `src/` onto the path **for pytest only**. PowerShell: `$env:PYTHONPATH = "src"` before running. TODO for a future task: `pip install -e .` in CI/local setup, or a runner script, so the env var isn't needed. **⚠️ The CI workflow has this bug today:** its "Run tracker" step calls `python -m mobile_tracker.main` without `PYTHONPATH=src`, so the first Actions run will fail with `ModuleNotFoundError`. Fix before wiring Actions — add `env: PYTHONPATH: src` to that step (or `pip install -e .` in the install step).
+- **Run quirk — RESOLVED (2026-06-22):** `python -m mobile_tracker.main` used to need `PYTHONPATH=src` (`pyproject.toml` wired `src/` for pytest only). **Fixed by `pip install -e .`** (editable install) — the local venv *and* the CI workflow now run `python -m mobile_tracker.main` with **no `PYTHONPATH`**. (The CI "Run tracker" bug this once warned about is fixed in the live workflow.)
 - **Demo data ≠ real prices.** `--demo` seeds hardcoded sample plans (only the Vivo *60GB/R$150* figure came from real recon). Real prices arrive only with the live adapters (CODE TASK #3+).
-- **Pending one-time auth:** the machine's `gh` token lacks the `workflow` scope, so `.github/workflows/mobile-price-tracker.yml` is untracked locally (pushes containing it are rejected). Before the Actions wiring task: `gh auth refresh -h github.com -s workflow` + Bridge completes the device-code/email check, then commit the workflow file.
+- **`gh` `workflow` scope — DONE (2026-06-22):** the Bridge authorized it via `gh auth refresh -h github.com -s workflow` (device-code). The workflow file is **pushed and live on GitHub**; token scopes now `gist, read:org, repo, workflow`.
+
+#### Daily Actions job — LIVE (2026-06-22, CODE TASK #8)
+
+- **Scheduler is ON.** `.github/workflows/mobile-price-tracker.yml` runs **daily at 18:00 BRT** (`cron: 0 21 * * *` UTC) + on-demand (`workflow_dispatch`, default `mode: live`). Each run: `pip install -r requirements.txt && pip install -e .`, `playwright install --with-deps chromium`, offline `pytest`, `python -m mobile_tracker.main` (all three), then commits the refreshed `data/mobile_plans.xlsx` back to the repo (`permissions: contents: write`). **GOVERNANCE §6:** `main.py` exits non-zero if any carrier yields zero plans → the job fails → **no commit** (no fake/partial snapshot).
+- **Committed history has BEGUN.** Synthetic seed cleared (`25f0da6`); first **real** snapshot landed via the runner on **2026-06-22** (`b5ca0a0`): **52 collected / 51 in latest**, full 8-sheet workbook.
+- **CI-IP-block risk did NOT materialize:** all three carriers — including **Vivo via headless Playwright** — scraped cleanly from GitHub's datacenter runner. (Re-check on future runs; if a carrier gets challenged from CI, the job alerts and we'd consider a self-hosted runner — never evade.)
+- **Weekly backup wired:** on Mondays (UTC) the daily job copies the workbook to `backups/mobile_plans_<date>.xlsx` and commits it (dated, never overwritten). First: `mobile_plans_2026-06-22.xlsx` (`6bc51f4`).
+- **Working-copy note:** `data/mobile_plans.xlsx` is now **owned by the daily job**. Don't hand-commit local review-run changes to it — `git checkout` it (or let the job own it); `git pull` before working to get the latest committed snapshot.
+- **Drive mirror:** still a fast-follow (GOVERNANCE §5) — an `rclone` step is stubbed (commented) in the workflow, pending a Bridge YES + an `RCLONE_CONFIG` secret.
 
 #### Current working environment (2026-06-19) — consolidated to ONE machine
 
@@ -242,6 +251,8 @@ Nullable fields are expected to be sparse early — parsers improve over time. A
 
 > **Per-operator sheets — IMPLEMENTED (#10, 2026-06-22):** one sheet per carrier present in the latest snapshot (name = display name **Vivo / Claro / TIM**; scales as carriers are added — absent carriers get no sheet). Within each: plans **grouped by category** in order **Postpaid → Control → Digital ({lite,flex}) → Prepaid** (bold sub-header per block), sorted ascending by `price_brl`. Readable column set: **Plan | Price R$ | Promo R$ | Data | Voice | Unlimited apps | Streaming | Notes** (Data = `data_gb` + `data_note`; Notes = `extra_benefits` + `price_note`; internal `plan_id` omitted; blank where null). `build_operator_sheets` + `_write_operator_sheets` in `excel_writer.py`, wired after the comparison sheet; rebuilt from the latest snapshot every run. First cut — expect iteration.
 
+> **Price-evolution view — design target (parked, 2026-06-22):** once enough daily history accumulates (committed history just began, #8), a **monthly heatmap** — rows = month, columns = carrier × category — color-graded by a **representative price per cell** (cell metric TBD; **prepaid as R$/day** given the unit caveat), with **event annotations** (promo windows, plan launches/removals from the `changes` sheet). Needs accumulated history; buttons/dashboard polish after the pipeline + scheduler are proven (now done). Future view, not scheduled.
+
 ## 8. Known challenges / risks
 
 - **JS rendering & anti-bot.** Modern telecom SPAs may rate-limit or block headless browsers; we stay polite (1×/day, delays, real UA) and treat blocks as limitations to discuss, never to defeat covertly (see GOVERNANCE §3).
@@ -262,6 +273,7 @@ Nullable fields are expected to be sparse early — parsers improve over time. A
 4. **History horizon → keep ALL snapshots forever (default).** Rows are tiny; revisit roll-ups only if the file grows unwieldy.
 
 ## 11. Changelog
+- **0.4.0 — 2026-06-22** — CODE TASK #8: **the daily GitHub Actions job is LIVE and committed history has begun.** `gh workflow` scope authorized; workflow pushed (`pip install -e .` fixes the PYTHONPATH/CI bug; `playwright install --with-deps`); **daily cron 18:00 BRT** (`0 21 * * *` UTC) + on-demand. Synthetic seed cleared; first real snapshot committed by the runner on 2026-06-22 (52 collected / 51 latest, 8 sheets) — **all three carriers scraped from CI** (no datacenter-IP block). **Weekly Monday backup** into `backups/` wired (first: `mobile_plans_2026-06-22.xlsx`). §2 cadence corrected to 18:00 BRT; §5 records the live job + auth-done + PYTHONPATH-fixed; §7 parks the monthly price-evolution heatmap design target. Minor-version bump for the scheduler milestone.
 - **0.3.3 — 2026-06-22** — CODE TASK #10: built the **per-operator sheets** (one tab per carrier — Vivo/Claro/TIM — present in the latest snapshot). Each groups plans by category (Postpaid → Control → Digital → Prepaid), price-sorted, with a readable column set (Plan / Price / Promo / Data / Voice / Unlimited apps / Streaming / Notes). `build_operator_sheets` + `_write_operator_sheets` in `excel_writer.py`, wired after the comparison sheet; the five prior sheets untouched (8 total). §7 per-operator item moved backlog → implemented. Tests 35 → 40.
 - **0.3.2 — 2026-06-22** — CODE TASK #9: built the cross-operator **`comparison`** sheet (§7 methodology now implemented, moved from parking-lot). Four groups (Pure Postpaid / Control-Hybrid / Prepaid / Digital), each rank-aligned across Vivo/Claro/TIM by ascending `price_brl`, with the prepaid-unit + Digital caveats printed in-sheet. `excel_writer.py`: `build_comparison_data` (pure) + `_write_comparison`, wired after `latest`; history/latest/changes/summary untouched. Tests 30 → 35.
 - **0.3.1 — 2026-06-22** — CODE TASK #7 (data-quality gaps before launch): **Vivo prepaid** now keeps all 4 recharge tiers (they share one offer code → `plan_id` disambiguated by data allowance); **Claro prepaid** parser added (`parse_claro_prepaid` over the `tab_select` Prezão tabs); **promo prices** wired for all three carriers (Claro prefix / Vivo `price-old` / TIM `tracejado`); TIM "Pro Express" `data_gb` left null + documented. §3 records the prepaid structures + promo locations; §7 updated. Tests 27 → 30.

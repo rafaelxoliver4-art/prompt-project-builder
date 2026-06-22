@@ -18,8 +18,8 @@
 | Excel writer | ✅ done (offline) | Works on fixture data; verified by demo run + unit test. |
 | Adapters (vivo/claro/tim) | ✅ all three live | **Claro** (`__NEXT_DATA__`), **Vivo** (Playwright DOM), **TIM** (Drupal `ofertas` JSON) parse real SP plans. |
 | Live scraping | 🟡 3 carriers live | **Claro** 13 + **Vivo** 24 + **TIM** 15 = **52** live SP plans, 2026-06-19. Claro-**prepaid** + `plan_id` pending. |
-| Scheduling (GitHub Actions) | 🟡 drafted | Workflow file present; needs repo + secrets + first run. |
-| GitHub + Drive backup | 🟡 partial | GitHub repo live (private, pushed by Code). Drive mirror not started. |
+| Scheduling (GitHub Actions) | ✅ LIVE | Daily **18:00 BRT** (`0 21 * * *`); first real snapshot committed by the runner 2026-06-22. |
+| GitHub + Drive backup | 🟡 GitHub done; Drive pending | Committed daily history begun + **weekly Monday backup** into `backups/`. Google Drive mirror = fast-follow (rclone stub in workflow). |
 
 Legend: ✅ done · 🟡 in progress / partial · 🔌 not started · ⛔ blocked
 
@@ -191,3 +191,14 @@ Machine #2 sent three open questions to the still-running machine #1 Code instan
 - **Tests 35 → 40:** one-sheet-per-present-carrier (TIM absent → no sheet), blocks grouped-in-order + price-sorted, only that carrier's plans, the 8-column set + promo/data formatting, write_workbook emits carrier sheets without disturbing the others. All offline.
 - **Review workbook left at `data/mobile_plans.xlsx` (uncommitted)** — open the Vivo/Claro/TIM tabs. **First cut — expect iteration.** CONTEXT → **v0.3.3**.
 - **Next (Architect):** react to the by-operator + comparison layouts; then the **daily GitHub Actions job** (committed history) and the promotions-over-time view / dashboard.
+
+### 2026-06-22 — CODE TASK #8: daily Actions job LIVE — committed price history begins 🎉 (Code)
+- **`gh workflow` scope authorized** (Bridge ran `gh auth refresh -s workflow`, device-code). Workflow file **pushed + live on GitHub** (`f37562e`) after being un-pushable since Task #1.
+- **Workflow fixed:** `pip install -e .` (editable install) → `python -m mobile_tracker.main` runs with **no `PYTHONPATH`** (kills the documented CI bug); `playwright install --with-deps chromium`; offline `pytest` gate; `permissions: contents: write`; commits `data/mobile_plans.xlsx` after the run. **Daily cron `0 21 * * *` = 18:00 BRT** + `workflow_dispatch` (default `live`).
+- **Synthetic seed cleared** (`25f0da6`) — append-only history now starts empty and fills with real snapshots.
+- **PROVED end-to-end:** manual run `gh workflow run` → job green in 2m21s. **"Collected 52 valid plans across 11 targets"** — *all three carriers scraped from GitHub's runner*, including **Vivo via headless Playwright** (the datacenter-IP block risk did **not** materialize). First real snapshot committed by the bot: **`b5ca0a0` — 52 collected / 51 in latest (2026-06-22)**, full 8-sheet workbook. Verified on `origin/main`.
+- **Weekly backup wired + fired:** today is Monday (UTC), so the job also committed **`backups/mobile_plans_2026-06-22.xlsx`** (`6bc51f4`) — dated, never overwritten. `backups/.gitkeep` tracks the dir.
+- **Daily cron is active** (workflow id `300305398`, status active). Runs unattended at 18:00 BRT going forward.
+- **Docs:** §2 cadence → 18:00 BRT; §5 records the live job (auth done, PYTHONPATH fixed, history begun, weekly backup, CI-IP finding = none, working-copy ownership note); §7 parks the monthly price-evolution **heatmap** design target; `sources.yaml` cron updated. CONTEXT → **v0.4.0**.
+- **No secrets committed; no Drive/rclone this task** (fast-follow). **Working-copy note:** `data/mobile_plans.xlsx` is now owned by the daily job — pull before working; don't hand-commit local review-run changes to it.
+- **Next (Architect):** optionally the **Google Drive mirror** (rclone-in-Actions, needs a Bridge YES + `RCLONE_CONFIG` secret); the promotions-over-time view; and — once history accumulates — the parked monthly price-evolution heatmap + a formatted dashboard.

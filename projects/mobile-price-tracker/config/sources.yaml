@@ -6,8 +6,9 @@ project:
   name: mobile-price-tracker
   currency: BRL
   timezone: America/Sao_Paulo
-  # End of day in Brazil (~23:00 BRT) == 02:00 UTC. GitHub Actions cron uses UTC.
-  schedule_cron_utc: "0 2 * * *"
+  # Daily at 18:00 BRT (UTC-3) == 21:00 UTC. Matches the live GitHub Actions cron. (Documentation
+  # only — the workflow hardcodes the cron; this records the intended schedule.)
+  schedule_cron_utc: "0 21 * * *"
   output_xlsx: data/mobile_plans.xlsx
   raw_capture_dir: data/raw   # saved HTML/JSON per run, for audit & re-parsing
 
