@@ -10,7 +10,7 @@ Design (CONTEXT §7):
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -372,7 +372,7 @@ def _line_chart(ws, title, c0, head_row, first, last, anchor):
     chart = LineChart()
     chart.title = title
     chart.y_axis.title = "R$"
-    chart.x_axis.title = "Date"
+    chart.x_axis.title = "Month"
     chart.height, chart.width = 7.2, 11.5
     chart.legend.position = "b"
     data = Reference(ws, min_col=c0, max_col=c0 + 2, min_row=head_row, max_row=last)  # incl. names row
@@ -395,6 +395,22 @@ def evolution_dates(history: pd.DataFrame) -> list[str]:
     return sorted({str(d) for d in history["snapshot_date"].dropna()})
 
 
+def evolution_months(history: pd.DataFrame) -> list[date]:
+    """Distinct MONTHS present in history, as first-of-month dates, chronological (oldest first).
+    Built from snapshot_date (ISO text 'YYYY-MM-DD'), deduped to (year, month). The matrix has one
+    row per month (the Figure-5 roll-up); daily detail stays in the `history` sheet. Offline-testable."""
+    if "snapshot_date" not in history.columns:
+        return []
+    months = set()
+    for d in history["snapshot_date"].dropna():
+        s = str(d)
+        try:
+            months.add((int(s[0:4]), int(s[5:7])))
+        except (ValueError, IndexError):
+            continue
+    return [date(y, m, 1) for (y, m) in sorted(months)]
+
+
 def _hist_cols():
     return (get_column_letter(COLUMNS.index("price_brl") + 1),
             get_column_letter(COLUMNS.index("carrier") + 1),
@@ -402,12 +418,22 @@ def _hist_cols():
             get_column_letter(COLUMNS.index("snapshot_date") + 1))
 
 
-def _minifs(pc, cc, dc, sc, carrier, category, row):
-    """Cheapest price `carrier` offered in `category` on the date in $A{row}, over the history sheet."""
+def _minifs_month(pc, cc, dc, sc, carrier, category, row):
+    """Cheapest price `carrier` offered in `category` DURING the month whose first day sits in $A{row},
+    computed live over the `history` sheet. The month scope is a MINIFS text-prefix over history's
+    snapshot_date — every history row whose ISO date starts with this month's "YYYY-MM-".
+
+    Why a prefix and not EOMONTH date-range bounds: history stores snapshot_date as TEXT, and Excel
+    coerces any date/serial comparison criterion (incl. `">="&EOMONTH(...)`) to a number that never
+    matches a text column — verified to return blank in real Excel. The prefix wildcard is the only
+    construction that filters the text dates correctly. The prefix is built from YEAR()/MONTH() + a
+    numeric "00" format (NOT the "yyyy"/"mm" date codes, which Excel LOCALIZES — pt-BR uses "aaaa"),
+    so it is locale-independent. (CONTEXT §7)"""
+    prefix = f'YEAR($A{row})&"-"&TEXT(MONTH($A{row}),"00")&"-*"'
     return (f'_xlfn.MINIFS(history!${pc}:${pc},'
             f'history!${cc}:${cc},"{carrier}",'
             f'history!${dc}:${dc},"{category}",'
-            f'history!${sc}:${sc},$A{row})')
+            f'history!${sc}:${sc},{prefix})')
 
 
 def _write_comparison(xl, history: pd.DataFrame):
@@ -418,11 +444,11 @@ def _write_comparison(xl, history: pd.DataFrame):
     _gridless(ws, TAB_COLORS["comparison"])
     pc, cc, dc, sc = _hist_cols()
     ncol = 1 + 3 * len(EVOLUTION_GROUPS)
-    ws.cell(row=1, column=1, value="Price evolution — cheapest R$ per carrier × category, by date") \
+    ws.cell(row=1, column=1, value="Price evolution — cheapest R$ per carrier × category, by month") \
         .font = Font(name=FONT, bold=True, size=14)
 
     HEAD1, HEAD2, FIRST = 35, 36, 37   # matrix sits BELOW the 2×2 line-chart block at the top
-    ws.cell(row=HEAD1, column=1, value="Date")
+    ws.cell(row=HEAD1, column=1, value="Month")
     ws.merge_cells(start_row=HEAD1, start_column=1, end_row=HEAD2, end_column=1)
     for g, (title, _cat, _kind) in enumerate(EVOLUTION_GROUPS):
         c0 = 2 + g * 3
@@ -438,17 +464,22 @@ def _write_comparison(xl, history: pd.DataFrame):
         ws.cell(row=HEAD2, column=c).alignment = Alignment(vertical="center", horizontal="center")
 
     r = FIRST
-    for d in evolution_dates(history):
-        ws.cell(row=r, column=1, value=d).font = Font(name=FONT)
+    for first_of_month in evolution_months(history):       # one row per MONTH (Figure-5 roll-up)
+        mcell = ws.cell(row=r, column=1, value=first_of_month)
+        mcell.number_format = "mmm-yy"                      # 2026-06-01 → "Jun-26"
+        mcell.font = Font(name=FONT)
         for g, (title, category, kind) in enumerate(EVOLUTION_GROUPS):
             c0 = 2 + g * 3
             for k, carrier in enumerate(EVOLUTION_CARRIERS):
                 if kind == "single":
-                    m = _minifs(pc, cc, dc, sc, carrier, category, r)
-                    formula = f'=IF({m}=0,"",{m})'
-                else:  # digital = min over lite OR flex; "" if the carrier has neither
-                    lite = _minifs(pc, cc, dc, sc, carrier, "lite", r)
-                    flex = _minifs(pc, cc, dc, sc, carrier, "flex", r)
+                    m = _minifs_month(pc, cc, dc, sc, carrier, category, r)
+                    formula = f'=IFERROR(IF({m}=0,"",{m}),"")'
+                else:  # digital = cheapest of lite OR flex that month; "" if the carrier has neither.
+                    # reciprocal-max picks the smaller positive price: a month's MINIFS returns 0 on
+                    # no-match (and no real plan is priced 0), so 1/0 → IFERROR → 0, and MAX keeps the
+                    # larger reciprocal = the smaller price; both absent → MAX(0,0)=0 → 1/0 → "".
+                    lite = _minifs_month(pc, cc, dc, sc, carrier, "lite", r)
+                    flex = _minifs_month(pc, cc, dc, sc, carrier, "flex", r)
                     formula = f'=IFERROR(1/MAX(IFERROR(1/{lite},0),IFERROR(1/{flex},0)),"")'
                 cell = ws.cell(row=r, column=c0 + k, value=formula)
                 cell.number_format = CURRENCY_FMT
@@ -469,9 +500,13 @@ def _write_comparison(xl, history: pd.DataFrame):
                         2 + g * 3, HEAD2, FIRST, last, anchors[g])
 
     note = ws.cell(row=last + 2, column=1,
-                   value="Pre = cheapest recharge amount captured (true R$/day needs validity-days we "
-                         "don't yet capture — CONTEXT §8). Digital = min of Vivo Lite / Claro Flex. "
-                         "Daily rows now; monthly roll-up is the planned next step.")
+                   value="Rows = month: each cell = cheapest R$ that carrier offered in the category "
+                         "DURING the month — a live MINIFS over the daily `history` sheet (month scope "
+                         "= a text-prefix over history's ISO dates; EOMONTH date-range bounds can't "
+                         "filter history's text-stored dates in Excel — CONTEXT §7). Pre = cheapest "
+                         "recharge amount (true R$/day needs validity-days we don't yet capture — §8). "
+                         "Digital = min of Vivo Lite / Claro Flex. Daily detail stays in `history`; "
+                         "the matrix grows one row per month.")
     note.font = Font(name=FONT, italic=True, size=9, color="808080")
     ws.freeze_panes = f"B{FIRST}"
     ws.column_dimensions["A"].width = 13
