@@ -142,19 +142,21 @@ def test_heatmap_colorscale_present(tmp_path):
     assert len(list(wb["comparison"].conditional_formatting)) >= 1
 
 
-def test_heatmap_is_green_yellow_2color_no_red(tmp_path):
-    """#19: comparison heatmap = a 2-colour green→yellow scale (JPMorgan style), per column, NO red."""
+def test_heatmap_is_per_block_green_yellow_no_red(tmp_path):
+    """#20: comparison heatmap = ONE 2-colour green→yellow scale per category BLOCK (its 3 carrier
+    columns × all date rows), JPMorgan style, NO red. _multi_day has 3 dates → rows 3..5."""
     ws = openpyxl.load_workbook(_multi_day(tmp_path / "m.xlsx"))["comparison"]
-    scales = []
+    blocks = {}
     for cf in ws.conditional_formatting:
         for rule in cf.rules:
             if rule.type == "colorScale" and rule.colorScale is not None:
-                scales.append([str(c.rgb) for c in rule.colorScale.color])
-    assert scales, "no color-scale rules on comparison"
-    for colors in scales:
+                blocks[str(cf.sqref)] = [str(c.rgb) for c in rule.colorScale.color]
+    # exactly the 4 per-category blocks (Control B:D, Post E:G, Pre H:J, Digital K:M), over the day rows
+    assert set(blocks) == {"B3:D5", "E3:G5", "H3:J5", "K3:M5"}
+    for colors in blocks.values():
         assert len(colors) == 2                              # 2-colour (not the 3-colour red scale)
-    flat = "".join(c for s in scales for c in s)
-    assert "A9D08E" in flat and "FFE699" in flat             # soft green (cheaper) + soft yellow (pricier)
+        assert any("A9D08E" in c for c in colors) and any("FFE699" in c for c in colors)
+    flat = "".join(c for cols in blocks.values() for c in cols)
     assert "F8696B" not in flat                              # no red
 
 
@@ -181,21 +183,46 @@ def test_other_sheets_keep_3color_red_scale(tmp_path):
 def test_four_line_charts_reference_daily_matrix(tmp_path):
     out = _multi_day(tmp_path / "m.xlsx")
     with zipfile.ZipFile(out) as z:
-        xmls = [z.read(n).decode("utf-8")
-                for n in z.namelist() if re.match(r"xl/charts/chart\d+\.xml$", n)]
-    assert len(xmls) == 4                                       # Control / Post / Pre / Digital
-    for xml in xmls:
+        all_charts = [z.read(n).decode("utf-8")
+                      for n in z.namelist() if re.match(r"xl/charts/chart\d+\.xml$", n)]
+    line_xmls = [x for x in all_charts if "lineChart" in x]     # exclude the #20 bar chart
+    assert len(line_xmls) == 4                                  # Control / Post / Pre / Digital
+    for xml in line_xmls:
         assert "'comparison'!$A" in xml                         # X = the Date column
         series_vals = re.findall(r"'comparison'!\$[B-M]\$\d+:\$[B-M]\$\d+", xml)
         assert len(series_vals) >= 3                            # TIM/Vivo/Claro value ranges (data rows)
         # series NAMES resolve to the row-2 carrier header (titles_from_data) → legend shows TIM/Vivo/Claro
         name_refs = re.findall(r"'comparison'!\$?[B-M]\$?2(?![0-9])", xml)
         assert len(name_refs) >= 3
-    joined = "".join(xmls)
+    joined = "".join(line_xmls)
     for col in "BCDEFGHIJKLM":                                  # all 12 carrier×category columns charted
         assert f"'comparison'!${col}$" in joined
     for color in ("0033A0", "660099", "DA291C"):               # palette line colors (TIM/Vivo/Claro)
         assert color in joined
+
+
+def test_current_price_bar_chart_on_charts(tmp_path):
+    """#20: a current-price grouped BAR chart on `Charts`, reading the EXACT LAST matrix row via a helper
+    table of cross-sheet refs (structure-driven, auto-updating). 4 categories × 3 carrier series."""
+    out = _multi_day(tmp_path / "m.xlsx")
+    wb = openpyxl.load_workbook(out)
+    comp = wb["comparison"]
+    # the true last data row: col A holds dates (the note below it is a string)
+    last = max(r for r in range(FIRST, comp.max_row + 1)
+               if isinstance(comp.cell(r, 1).value, date))
+    refs = [c.value for row in wb["Charts"].iter_rows() for c in row
+            if isinstance(c.value, str) and c.value.startswith("=") and "comparison" in c.value]
+    assert len(refs) == 12                                      # 4 categories × 3 carriers
+    # every helper ref points at the EXACT matrix last row (no-offer cells wrapped in IF(...="",NA(),...))
+    for r in refs:
+        rows = {int(m) for m in re.findall(r"'comparison'!\$?[A-M]\$?(\d+)", r)}
+        assert rows == {last}
+    with zipfile.ZipFile(out) as z:
+        cx = [z.read(n).decode("utf-8") for n in z.namelist() if re.match(r"xl/charts/chart\d+\.xml$", n)]
+    assert sum("barChart" in x for x in cx) == 1                # exactly one grouped bar chart
+    assert sum("lineChart" in x for x in cx) == 4               # plus the 4 line charts (5 total)
+    bar = next(x for x in cx if "barChart" in x)
+    assert "'Charts'!" in bar                                   # bar reads the on-sheet helper table
 
 
 def test_charts_sheet_exists_and_comparison_is_table_only(tmp_path):

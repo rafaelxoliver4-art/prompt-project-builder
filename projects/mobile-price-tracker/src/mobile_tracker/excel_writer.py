@@ -14,7 +14,8 @@ from datetime import date, datetime
 from pathlib import Path
 
 import pandas as pd
-from openpyxl.chart import LineChart, Reference
+from openpyxl.chart import BarChart, LineChart, Reference
+from openpyxl.chart.label import DataLabelList
 from openpyxl.chart.marker import Marker
 from openpyxl.chart.shapes import GraphicalProperties
 from openpyxl.drawing.line import LineProperties
@@ -399,7 +400,8 @@ def _line_chart(chart_ws, data_ws, title, c0, head_row, first, last, anchor):
     chart.y_axis.title = "R$"
     chart.x_axis.title = "Date"
     chart.height, chart.width = 7.2, 11.5
-    chart.legend.position = "b"
+    chart.legend.position = "b"                  # legend at the bottom (clean report look, #20)
+    chart.x_axis.majorGridlines = None           # no vertical gridlines (light horizontal Y at most, #20)
     data = Reference(data_ws, min_col=c0, max_col=c0 + 2, min_row=head_row, max_row=last)  # incl. names
     cats = Reference(data_ws, min_col=1, min_row=first, max_row=last)
     chart.add_data(data, titles_from_data=True)
@@ -525,10 +527,11 @@ def _write_comparison(xl, history: pd.DataFrame):
         r += 1
     last = r - 1
 
-    if last >= FIRST:    # per-CARRIER-COLUMN heatmap: green→yellow, each column by its own min/max (#19)
-        for c in range(2, ncol + 1):
-            L = get_column_letter(c)
-            ws.conditional_formatting.add(f"{L}{FIRST}:{L}{last}", _price_scale_2color())
+    if last >= FIRST:    # per-category-BLOCK heatmap: one green→yellow scale over each group's 3 carrier
+        for g in range(len(EVOLUTION_GROUPS)):   # columns × all date rows, so colour reflects price vs
+            c0 = 2 + g * 3                        # ALL carriers in that category (JPMorgan style, #20)
+            rng = f"{get_column_letter(c0)}{FIRST}:{get_column_letter(c0 + 2)}{last}"
+            ws.conditional_formatting.add(rng, _price_scale_2color())
 
     note = ws.cell(row=last + 2, column=1,
                    value="Rows = day: each cell = cheapest R$ that carrier offered in the category on "
@@ -536,9 +539,9 @@ def _write_comparison(xl, history: pd.DataFrame):
                          "locale-safe text date built from the row's date, since history stores dates as "
                          "TEXT — CONTEXT §7). Pre = cheapest 30-day prepaid plan (validity_days >= 28; "
                          "pre-#18 dates have no validity → blank, fills from 26-Jun on). Digital = min of "
-                         "Vivo Lite / Claro Flex. Heatmap = per-column green→yellow (subtle while prices "
-                         "are near-flat; differentiates as they move). Grows one row per day; charts on "
-                         "the `Charts` sheet.")
+                         "Vivo Lite / Claro Flex. Heatmap = per-category-block green→yellow (each cell vs "
+                         "all carriers in its category; subtle while prices are near-flat, differentiates "
+                         "as they move). Grows one row per day; charts on the `Charts` sheet.")
     note.font = Font(name=FONT, italic=True, size=9, color="808080")
     ws.freeze_panes = f"B{FIRST}"      # freeze only the 2 header rows + the Date column (scrolls freely)
     ws.protection.sheet = False        # explicit: the table is never locked (the #17 "locked view" fix)
@@ -550,20 +553,71 @@ def _write_comparison(xl, history: pd.DataFrame):
 
 def _write_charts(xl, comp_ws, first: int, last: int):
     """`Charts` sheet (#17): the 4 per-category line charts (Control / Post / Pre / Digital) in a 2×2
-    layout, each referencing the `comparison` matrix via cross-sheet refs (so they grow as days
-    accumulate, #19). Keeps the palette / markers / daily X-axis. Lives apart from the table so the
-    `comparison` sheet opens as a clean, scrollable matrix with no chart overlay."""
+    layout + a current-price grouped bar chart below them (#20), each referencing the `comparison` matrix
+    via cross-sheet refs (so they grow / update as days accumulate, #19). Clean report styling — bottom
+    legend, no vertical gridlines, carrier palette. Lives apart from the table so the `comparison` sheet
+    opens as a clean, scrollable matrix with no chart overlay."""
     ws = xl.book.create_sheet("Charts")
     _gridless(ws, TAB_COLORS["Charts"])
     ws.cell(row=1, column=1,
             value="Price evolution — cheapest R$ per carrier × category, by day (source: `comparison`)") \
         .font = Font(name=FONT, bold=True, size=14)
     if last >= first:                                  # nothing to chart until ≥1 day exists
-        anchors = ["A3", "J3", "A20", "J20"]           # 2×2 block
+        anchors = ["A3", "J3", "A20", "J20"]           # 2×2 block of line charts
         for g, (title, _c, _k) in enumerate(EVOLUTION_GROUPS):
             _line_chart(ws, comp_ws, f"{title.split(' (')[0]} — cheapest R$ over time",
                         2 + g * 3, EVO_HEAD2, first, last, anchors[g])
+        _current_price_bar(ws, comp_ws, last)          # current-price grouped bar chart (#20)
     return ws
+
+
+def _current_price_bar(ws, comp_ws, last):
+    """Grouped BAR chart of the MOST RECENT day's entry-level price per carrier × category (JPMorgan
+    Fig-11 style, #20): X = Control / Post / Pre / Digital, 3 bars each = TIM / Vivo / Claro. Values read
+    the LAST matrix row via cross-sheet refs held in a small helper table (off to the right at P37) — so
+    they are structure-driven (no hardcoded numbers) and rebuilt each run to the current last row, auto-
+    updating as new days land. Pre bar = the matrix's 30-day monthly Pre value."""
+    comp = comp_ws.title
+    HCOL, HROW = 16, 37        # helper table top-left = P37, clear of the bar chart (anchored at A37)
+    ws.cell(row=HROW, column=HCOL, value="Latest-day price (bar source)") \
+        .font = Font(name=FONT, italic=True, size=9, color="808080")
+    for k, carrier in enumerate(EVOLUTION_CARRIERS):                       # header: TIM | Vivo | Claro
+        ws.cell(row=HROW, column=HCOL + 1 + k, value=EVOLUTION_DISP[carrier]) \
+            .font = Font(name=FONT, bold=True)
+    for g, (title, _c, _k) in enumerate(EVOLUTION_GROUPS):                 # one row per category
+        rr = HROW + 1 + g
+        ws.cell(row=rr, column=HCOL, value=title.split(" (")[0]).font = Font(name=FONT)
+        for k in range(3):
+            col = get_column_letter(2 + g * 3 + k)        # matrix column for this group × carrier
+            ref = f"'{comp}'!{col}{last}"
+            # a no-offer cell (e.g. TIM has no Digital line → blank matrix cell) → NA() so the bar is a
+            # GAP, not a misleading labelled R$ 0.00 bar; a real price passes through unchanged. (#20)
+            c = ws.cell(row=rr, column=HCOL + 1 + k, value=f'=IF({ref}="",NA(),{ref})')
+            c.number_format = CURRENCY_FMT
+            c.font = Font(name=FONT)
+    cat_top, cat_bot = HROW + 1, HROW + len(EVOLUTION_GROUPS)
+    ws.column_dimensions[get_column_letter(HCOL)].width = 12        # readable source table (no #####)
+    for k in range(3):
+        ws.column_dimensions[get_column_letter(HCOL + 1 + k)].width = 11
+    chart = BarChart()
+    chart.type = "col"                                 # vertical grouped columns
+    chart.grouping = "clustered"
+    chart.title = "Current entry-level price by carrier (R$)"
+    chart.y_axis.title = "R$"
+    chart.height, chart.width = 8.0, 16.0
+    chart.legend.position = "b"
+    chart.x_axis.majorGridlines = None                 # no vertical gridlines (clean look)
+    data = Reference(ws, min_col=HCOL + 1, max_col=HCOL + 3, min_row=HROW, max_row=cat_bot)  # incl names
+    cats = Reference(ws, min_col=HCOL, min_row=cat_top, max_row=cat_bot)
+    chart.add_data(data, titles_from_data=True)
+    chart.set_categories(cats)
+    for s, carrier in zip(chart.series, EVOLUTION_CARRIERS):   # bar fill = carrier palette
+        s.graphicalProperties = GraphicalProperties()
+        s.graphicalProperties.solidFill = CARRIER_LINE[carrier]
+    chart.dataLabels = DataLabelList()
+    chart.dataLabels.showVal = True                    # data labels on
+    ws.add_chart(chart, "A37")
+    return chart
 
 
 def write_workbook(plans, path: str | Path, run_ts: datetime) -> dict:
