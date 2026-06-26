@@ -64,3 +64,32 @@ def test_price_parsing():
 def test_no_duplicate_name_price():
     keys = [(p.plan_name, p.price_brl) for p in _plans()]
     assert len(keys) == len(set(keys))
+
+
+def test_control_plans_have_no_validity():
+    # regression: validity parsing is PREPAID-only — control plans keep validity_days None.
+    assert all(p.validity_days is None for p in _plans())
+
+
+def test_prepaid_validity_days_is_max_of_dias():
+    # #18: TIM prepaid (XIP) has NO clean structured validity field — validity is parsed as the MAX
+    # "N dias" in the oferta (the plan period; shorter promo bonuses don't win). Gated on prepaid.
+    import json
+    settings = {"ofertas": [{
+        "nid": [{"value": "59906"}],
+        "title": [{"value": "2 Card - TIM Pré XIP Plus - 6GB - [PROD]"}],
+        "field_preco_card_oferta": [{"value": "20,00"}],
+        # validity lives in the benefits-modal HTML: a 30-day plan with a shorter promo bonus
+        "field_layout_canvas_segundo": [{"value": "benefícios válidos por 30 dias; bônus de 5GB por 17 dias"}],
+    }]}
+    html = ('<script data-drupal-selector="drupal-settings-json" type="application/json">'
+            + json.dumps(settings, ensure_ascii=False) + "</script>")
+    t = Target(carrier="tim", render="html", category="prepaid", category_label="Pré-pago",
+               state="SP", url="https://www.tim.com.br/sp/para-voce/planos/pre-pago")
+    plans = parse_tim_html(html, t, raw_ref="fx")
+    assert len(plans) == 1
+    p = plans[0]
+    assert p.category == "prepaid"
+    assert p.validity_days == 30          # max(30, 17) — the plan period, not the 17-day bonus
+    assert p.data_gb == 6.0 and p.price_brl == 20.0
+    assert p.plan_id == "tim:59906"

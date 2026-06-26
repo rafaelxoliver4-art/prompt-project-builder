@@ -71,16 +71,34 @@ def test_plan_id_native_offer_code():
 PREPAID_FIXTURE = Path(__file__).parent / "fixtures" / "vivo_prepaid_sp.html"
 
 
+def _prepaid_target() -> Target:
+    return Target(carrier="vivo", render="aem", category="prepaid", category_label="Pré-pago",
+                  state="SP", url="https://vivo.com.br/.../pre-pago/vivo-pre")
+
+
 def test_prepaid_tiers_are_distinct():
     # All 4 prepaid tiers share ONE page-level offer code + the name "Vivo Pré"; the data allowance
     # (non-price) must keep them distinct so none collapse.
-    t = Target(carrier="vivo", render="aem", category="prepaid", category_label="Pré-pago",
-               state="SP", url="https://vivo.com.br/.../pre-pago/vivo-pre")
-    plans = parse_vivo_html(PREPAID_FIXTURE.read_text(encoding="utf-8"), t, raw_ref="fx")
+    plans = parse_vivo_html(PREPAID_FIXTURE.read_text(encoding="utf-8"), _prepaid_target(), raw_ref="fx")
     assert len(plans) == 4
     assert len({p.plan_id for p in plans}) == 4                 # not collapsed
     assert all(p.plan_id.startswith("vivo:VIV") for p in plans)
     assert sorted(int(p.data_gb) for p in plans) == [4, 5, 9, 25]
+
+
+def test_prepaid_validity_days_captured():
+    # #18: each Vivo prepaid tier carries its recarga validity ("N dias" in the card). The 30-day tier
+    # (R$30 / 25GB) reads validity_days=30; the cheapest 30-day is what the Pre column compares.
+    plans = parse_vivo_html(PREPAID_FIXTURE.read_text(encoding="utf-8"), _prepaid_target(), raw_ref="fx")
+    by_gb = {int(p.data_gb): p for p in plans}
+    assert by_gb[25].validity_days == 30 and by_gb[25].price_brl == 30.0   # the real 30-day plan
+    assert by_gb[4].validity_days == 15                                    # a 15-day tier
+    assert all(p.validity_days for p in plans)                             # every tier tagged
+
+
+def test_postpaid_has_no_validity():
+    # regression: validity parsing is PREPAID-only — postpaid cards keep validity_days None.
+    assert all(p.validity_days is None for p in _plans())
 
 
 def test_promo_captured_from_struck_price():

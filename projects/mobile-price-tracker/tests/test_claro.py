@@ -105,8 +105,9 @@ def test_plan_id_native_slug_and_unique():
     assert any("plano-pos-60gb" in p.plan_id for p in plans)
 
 
-def test_prepaid_prezao_captured():
-    # Claro prepaid uses tab_select (not card_360) → dedicated parse_claro_prepaid.
+def test_prepaid_30day_plan_with_validity():
+    # #18: Claro prepaid now captures the REAL 30-day Prezão plan + validity_days (NOT the "R$1 por
+    # dia" headline the old parser grabbed). Tiers come from the page's rich text ("R$ 30/30 dias – 12GB").
     import json
     from mobile_tracker.adapters.claro import parse_claro_prepaid
     fixture = Path(__file__).parent / "fixtures" / "claro_prepaid_sp.json"
@@ -115,9 +116,33 @@ def test_prepaid_prezao_captured():
                state="SP", url="https://www.claro.com.br/celular/planos-pre/prezao")
     plans = parse_claro_prepaid(data, t, raw_ref="fx")
     assert len(plans) >= 1
-    prez = plans[0]
-    assert "prez" in prez.plan_name.lower()
-    assert prez.price_brl and prez.price_brl > 0
-    assert prez.data_gb == 12.0
-    assert prez.category == "prepaid"
-    assert prez.plan_id.startswith("claro:")
+    # every prepaid plan carries a validity and a real recarga price (no R$1/dia headline anymore)
+    assert all(p.validity_days and p.price_brl and p.price_brl >= 15 for p in plans)
+    assert all(p.category == "prepaid" and p.plan_id.startswith("claro:") for p in plans)
+    # the real 30-day plan is present: R$30 / 30 dias / 12GB; plan_id is validity+gb (never price-derived)
+    thirty = [p for p in plans if p.validity_days >= 28]
+    assert thirty, f"no 30-day plan in {[(p.plan_id, p.validity_days) for p in plans]}"
+    cheapest = min(thirty, key=lambda p: p.price_brl)
+    assert cheapest.price_brl == 30.0           # was R$1 before #18
+    assert cheapest.data_gb == 12.0
+    assert cheapest.validity_days == 30
+    assert cheapest.plan_id == "claro:prezao-30d-12gb"
+
+
+def test_prepaid_collision_keeps_cheaper():
+    # #18: two tiers with the SAME (validity, gb) — e.g. R$35 sem anúncio vs R$30 com anúncio, both
+    # 30d/12GB — collapse to one plan (id is validity+gb, not price), keeping the CHEAPER recarga.
+    from mobile_tracker.adapters.claro import parse_claro_prepaid
+    data = {"rich": "R$ 35/30 dias – 12GB sem anúncio • R$ 30/30 dias – 12GB com anúncio"}
+    t = Target(carrier="claro", render="nextjs", category="prepaid", category_label="Prezão (Pré)",
+               state="SP", url="https://www.claro.com.br/celular/planos-pre/prezao")
+    plans = parse_claro_prepaid(data, t)
+    pset = [p for p in plans if p.validity_days == 30 and int(p.data_gb) == 12]
+    assert len(pset) == 1                        # collapsed by (validity, gb)
+    assert pset[0].price_brl == 30.0             # the cheaper recarga won
+    assert pset[0].plan_id == "claro:prezao-30d-12gb"
+
+
+def test_postpaid_has_no_validity():
+    # regression: validity is PREPAID-only — postpaid plans (parse_next_data) keep validity_days None.
+    assert all(p.validity_days is None for p in _plans())

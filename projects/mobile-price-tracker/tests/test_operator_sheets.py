@@ -67,6 +67,19 @@ def test_columns_and_promo_and_data():
     assert "De R$59,90" in (row[7] or "")             # notes carries price_note
 
 
+def test_prepaid_row_shows_validity_in_data_cell():
+    # #18: a prepaid plan's validity_days is shown in the operator-sheet Data cell (e.g. "12 GB · 30d").
+    df = pd.DataFrame([dict(
+        carrier="claro", category="prepaid", plan_name="Prezão 12GB (30 dias)", price_brl=30.0,
+        price_promo_brl=None, data_gb=12.0, data_note=None, validity_days=30, voice=None,
+        unlimited_apps=None, streaming=None, extra_benefits=None, price_note=None)])
+    op = {o["carrier"]: o for o in build_operator_sheets(df)}["claro"]
+    rows = [r for blk in op["blocks"] for r in blk["rows"]]
+    assert len(rows) == 1
+    data_cell = rows[0][3]                              # the Data column
+    assert "12 GB" in data_cell and "30d" in data_cell
+
+
 def test_write_workbook_emits_carrier_sheets_only_for_present(tmp_path):
     out = tmp_path / "p.xlsx"
     plans = []

@@ -46,6 +46,23 @@ def test_history_is_append_only_and_changes_detected(tmp_path):
     assert abs(delta - 10.0) < 1e-9
 
 
+def test_merge_history_enforces_schema_order(tmp_path):
+    # #18 regression: a pre-#18 history (no validity_days column) merged with new rows that DO have it
+    # must keep COLUMNS order — otherwise pd.concat appends validity_days at the end and the matrix's
+    # column-letter formulas (history!$M:$M) point at the wrong column.
+    from mobile_tracker.excel_writer import _merge_history
+    from mobile_tracker.models import COLUMNS
+    old_cols = [c for c in COLUMNS if c != "validity_days"]
+    existing = pd.DataFrame([dict(snapshot_date="2026-06-22", carrier="claro", category="prepaid",
+                                  state="SP", plan_name="Prezão", plan_id="claro:x", price_brl=1.0)],
+                            columns=old_cols)
+    fresh = pd.DataFrame([dict(snapshot_date="2026-06-23", carrier="claro", category="prepaid",
+                               state="SP", plan_name="Prezão 12GB", plan_id="claro:prezao-30d-12gb",
+                               price_brl=30.0, validity_days=30)], columns=COLUMNS)
+    merged = _merge_history(existing, fresh)
+    assert list(merged.columns) == COLUMNS                # validity_days at its schema position (M), not end
+
+
 def test_rerun_same_day_is_idempotent(tmp_path):
     out = tmp_path / "plans.xlsx"
     write_workbook([_plan("A", 50.0, "2026-06-10")], out, datetime(2026, 6, 10, 23))

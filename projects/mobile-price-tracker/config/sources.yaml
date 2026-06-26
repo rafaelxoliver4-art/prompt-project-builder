@@ -21,6 +21,12 @@ scraping:
   request_timeout_seconds: 30
   headless: true
 
+# Prepaid normalization (#18). The Pre matrix column compares the cheapest PREPAID plan whose
+# validity_days >= min_validity_days — i.e. a real 30-day plan (not the "R$1/day" headline or a
+# 15-day tier). Adapters parse each prepaid plan's validity_days; the matrix filters on it.
+prepaid:
+  min_validity_days: 28      # a "30-day" plan in practice (carriers show 30; 28 gives margin)
+
 # Daily price-change email alert (≥ threshold_pct move, up or down, vs the previous snapshot).
 # NON-SECRET config only — the SMTP password is read from the EMAIL_APP_PASSWORD env var
 # (a GitHub Actions Secret), NEVER stored here or committed.

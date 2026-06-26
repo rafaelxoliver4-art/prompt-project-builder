@@ -69,7 +69,7 @@ def test_matrix_rows_are_months(tmp_path):
     ws = wb["comparison"]
     assert ws.cell(row=H1, column=1).value == "Month"
     titles = [ws.cell(row=H1, column=c).value for c in (2, 5, 8, 11)]
-    assert titles == ["Control (R$/mo)", "Post (R$/mo)", "Pre (R$, recarga)", "Digital (R$/mo)"]
+    assert titles == ["Control (R$/mo)", "Post (R$/mo)", "Pre (R$/mo, 30-day)", "Digital (R$/mo)"]
     assert [ws.cell(row=H2, column=c).value for c in (2, 3, 4)] == ["TIM", "Vivo", "Claro"]
     # one row per month, stored as first-of-month dates, chronological
     m1 = ws.cell(row=FIRST, column=1).value
@@ -120,6 +120,33 @@ def test_two_snapshots_same_month_roll_up_to_one_row(tmp_path):
     assert "MINIFS" in post_tim and f"MONTH($A{FIRST})" in post_tim  # one MINIFS scoped to the whole month
     hist = pd.read_excel(out, sheet_name="history")
     assert set(hist["snapshot_date"].astype(str)) == {"2026-06-10", "2026-06-20"}  # daily detail kept
+
+
+def _mk_pre(carrier, name, price, date_str, validity):
+    p = _mk(carrier, "prepaid", name, price, date_str)
+    p.validity_days = validity
+    return p
+
+
+def test_pre_column_filters_30day_validity(tmp_path):
+    """#18: the Pre cell is a MINIFS that ALSO filters validity_days >= 28, so it picks the cheapest
+    30-DAY prepaid plan — not a cheaper short-validity tier (the old R$1/day-style bug)."""
+    from openpyxl.utils import get_column_letter
+    from mobile_tracker.models import COLUMNS
+    out = tmp_path / "m.xlsx"
+    # Claro: a cheaper 15-day tier AND the real 30-day tier in the same month → Pre must pick the 30-day.
+    write_workbook([
+        _mk_pre("claro", "Prezão 5GB (15d)", 15.0, "2026-06-22", 15),
+        _mk_pre("claro", "Prezão 12GB (30d)", 30.0, "2026-06-22", 30),
+    ], out, datetime(2026, 6, 22, 18))
+    wb = openpyxl.load_workbook(out)
+    # history carries the new validity_days column
+    assert "validity_days" in [c.value for c in wb["history"][1]]
+    ws = wb["comparison"]
+    pre_claro = ws.cell(row=FIRST, column=10).value     # Pre group cols 8/9/10 = TIM/Vivo/Claro
+    assert isinstance(pre_claro, str) and "MINIFS" in pre_claro and '"prepaid"' in pre_claro
+    vcol = get_column_letter(COLUMNS.index("validity_days") + 1)
+    assert f'history!${vcol}:${vcol},">=28"' in pre_claro    # the 30-day validity filter
 
 
 def test_evolution_months_year_boundary():

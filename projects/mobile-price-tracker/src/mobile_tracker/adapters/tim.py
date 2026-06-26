@@ -36,6 +36,7 @@ from ..config import Target
 from ..models import Plan
 
 _GB = re.compile(r"(\d+)\s*GB", re.I)
+_DAYS = re.compile(r"(\d+)\s*dias", re.I)   # prepaid validity (#18)
 
 
 def _price_brl(value) -> float | None:
@@ -103,6 +104,15 @@ def parse_tim_html(html: str, target: Target, raw_ref: str | None = None) -> lis
             continue
         gb = _GB.search(name)
         data_gb = float(gb.group(1)) if gb else None
+        # PREPAID only (#18): TIM Pré XIP plans have NO clean structured validity field — the period
+        # lives in the oferta's benefits-modal HTML ("...por 30 dias..." + shorter promo bonuses). We
+        # take the MAX "N dias" in the oferta (the plan period; bonuses are <= it). Gated on category so
+        # postpaid/control parsing is untouched. Fragile (HTML text, not a field) — documented, and the
+        # raw capture is retained for re-parsing if TIM restructures.
+        validity_days = None
+        if target.category == "prepaid":
+            days = [int(d) for d in _DAYS.findall(json.dumps(o, ensure_ascii=False))]
+            validity_days = max(days) if days else None
         # native Drupal node id (e.g. "155891"); fall back to the SKU field, then a name slug
         nid = _field(o, "nid")
         if nid and str(nid).strip():
@@ -121,7 +131,8 @@ def parse_tim_html(html: str, target: Target, raw_ref: str | None = None) -> lis
             price_brl, price_promo, note = price, None, None
         plans.append(BaseAdapter.make_plan(
             target, plan_name=name, plan_id=plan_id, price_brl=price_brl,
-            price_promo_brl=price_promo, price_note=note, data_gb=data_gb, raw_ref=raw_ref))
+            price_promo_brl=price_promo, price_note=note, data_gb=data_gb,
+            validity_days=validity_days, raw_ref=raw_ref))
     return plans
 
 

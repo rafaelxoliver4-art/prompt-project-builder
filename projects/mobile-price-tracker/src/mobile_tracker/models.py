@@ -24,6 +24,7 @@ COLUMNS: list[str] = [
     "price_note",
     "data_gb",
     "data_note",
+    "validity_days",
     "unlimited_apps",
     "voice",
     "sms",
@@ -52,6 +53,9 @@ class Plan:
     price_note: Optional[str] = None
     data_gb: Optional[float] = None
     data_note: Optional[str] = None
+    # Plan validity period in days — populated for PREPAID (recarga lasts N days); the Pre matrix
+    # column compares the cheapest 30-day plan (validity_days >= 28). Null/blank for monthly plans.
+    validity_days: Optional[int] = None
     unlimited_apps: Optional[str] = None
     voice: Optional[str] = None
     sms: Optional[str] = None

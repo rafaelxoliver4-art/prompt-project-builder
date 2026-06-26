@@ -110,7 +110,11 @@ def _merge_history(existing: pd.DataFrame, fresh: pd.DataFrame) -> pd.DataFrame:
     df = _with_key(df)
     df = df.drop_duplicates(subset=["snapshot_date", "carrier", "state", "_key"], keep="last")
     df = df.sort_values(["snapshot_date", "carrier", "category", "plan_name"]).reset_index(drop=True)
-    return df.drop(columns=["_key"])
+    # Enforce the canonical schema/order (CONTEXT §6). This matters when merging a history written by
+    # OLDER code that lacked a column (e.g. validity_days, #18): pd.concat would otherwise append the
+    # new column at the END, so the matrix's column-letter formulas (which assume COLUMNS order) would
+    # point at the wrong column. reindex also drops the temporary `_key`. (#18)
+    return df.reindex(columns=COLUMNS)
 
 
 def _compute_changes(history: pd.DataFrame) -> pd.DataFrame:
@@ -282,6 +286,10 @@ def _operator_plan_row(p) -> list:
     dnote = _s(p.data_note)
     if dnote:
         data = f"{data} ({dnote})" if data else dnote
+    vd = getattr(p, "validity_days", None)              # prepaid validity, e.g. "30d" (#18)
+    if pd.notna(vd):
+        tag = f"{int(vd)}d"
+        data = f"{data} · {tag}" if data else tag
     notes = " · ".join(x for x in (_s(p.extra_benefits), _s(p.price_note)) if x) or None
     return [
         p.plan_name,
@@ -358,9 +366,13 @@ def _write_operator_sheets(xl, latest: pd.DataFrame):
 EVOLUTION_GROUPS = [
     ("Control (R$/mo)", "control", "single"),
     ("Post (R$/mo)", "postpaid", "single"),
-    ("Pre (R$, recarga)", "prepaid", "single"),
+    ("Pre (R$/mo, 30-day)", "prepaid", "prepaid30"),     # cheapest 30-day prepaid plan (#18)
     ("Digital (R$/mo)", None, "digital"),
 ]
+# The Pre column compares the cheapest PREPAID plan whose validity_days >= this (a real 30-day plan,
+# not the R$1/day or a 15-day tier). Mirrors config/sources.yaml `prepaid.min_validity_days`; the
+# matrix is built without Settings, so the operative value is mirrored here (change both). #18
+PREPAID_MIN_VALIDITY_DAYS = 28
 EVOLUTION_CARRIERS = ["tim", "vivo", "claro"]
 EVOLUTION_DISP = {"tim": "TIM", "vivo": "Vivo", "claro": "Claro"}
 CARRIER_LINE = {"tim": "0033A0", "vivo": "660099", "claro": "DA291C"}  # series colors = tab palette
@@ -422,10 +434,11 @@ def _hist_cols():
             get_column_letter(COLUMNS.index("snapshot_date") + 1))
 
 
-def _minifs_month(pc, cc, dc, sc, carrier, category, row):
+def _minifs_month(pc, cc, dc, sc, carrier, category, row, extra_crit=""):
     """Cheapest price `carrier` offered in `category` DURING the month whose first day sits in $A{row},
     computed live over the `history` sheet. The month scope is a MINIFS text-prefix over history's
-    snapshot_date — every history row whose ISO date starts with this month's "YYYY-MM-".
+    snapshot_date — every history row whose ISO date starts with this month's "YYYY-MM-". `extra_crit`
+    appends one more MINIFS criteria pair (used by the Pre column to add validity_days >= 28). #18
 
     Why a prefix and not EOMONTH date-range bounds: history stores snapshot_date as TEXT, and Excel
     coerces any date/serial comparison criterion (incl. `">="&EOMONTH(...)`) to a number that never
@@ -437,7 +450,8 @@ def _minifs_month(pc, cc, dc, sc, carrier, category, row):
     return (f'_xlfn.MINIFS(history!${pc}:${pc},'
             f'history!${cc}:${cc},"{carrier}",'
             f'history!${dc}:${dc},"{category}",'
-            f'history!${sc}:${sc},{prefix})')
+            f'history!${sc}:${sc},{prefix}'
+            f'{extra_crit})')
 
 
 def _write_comparison(xl, history: pd.DataFrame):
@@ -451,6 +465,7 @@ def _write_comparison(xl, history: pd.DataFrame):
     ws = xl.book.create_sheet("comparison")
     _gridless(ws, TAB_COLORS["comparison"])
     pc, cc, dc, sc = _hist_cols()
+    vc = get_column_letter(COLUMNS.index("validity_days") + 1)   # history validity_days column (#18)
     ncol = 1 + 3 * len(EVOLUTION_GROUPS)
 
     HEAD1, HEAD2, FIRST = EVO_HEAD1, EVO_HEAD2, EVO_FIRST   # table at the top: 1 / 2 / 3+
@@ -480,6 +495,10 @@ def _write_comparison(xl, history: pd.DataFrame):
                 if kind == "single":
                     m = _minifs_month(pc, cc, dc, sc, carrier, category, r)
                     formula = f'=IFERROR(IF({m}=0,"",{m}),"")'
+                elif kind == "prepaid30":   # cheapest 30-day prepaid plan (validity_days >= 28) — #18
+                    crit = f',history!${vc}:${vc},">={PREPAID_MIN_VALIDITY_DAYS}"'
+                    m = _minifs_month(pc, cc, dc, sc, carrier, "prepaid", r, extra_crit=crit)
+                    formula = f'=IFERROR(IF({m}=0,"",{m}),"")'
                 else:  # digital = cheapest of lite OR flex that month; "" if the carrier has neither.
                     # reciprocal-max picks the smaller positive price: a month's MINIFS returns 0 on
                     # no-match (and no real plan is priced 0), so 1/0 → IFERROR → 0, and MAX keeps the
@@ -505,7 +524,7 @@ def _write_comparison(xl, history: pd.DataFrame):
                          "DURING the month — a live MINIFS over the daily `history` sheet (month scope "
                          "= a text-prefix over history's ISO dates; EOMONTH date-range bounds can't "
                          "filter history's text-stored dates in Excel — CONTEXT §7). Pre = cheapest "
-                         "recharge amount (true R$/day needs validity-days we don't yet capture — §8). "
+                         "30-day prepaid plan (validity_days >= 28), shown as its monthly R$/mo (#18). "
                          "Digital = min of Vivo Lite / Claro Flex. Daily detail stays in `history`; "
                          "the matrix grows one row per month. Charts are on the `Charts` sheet.")
     note.font = Font(name=FONT, italic=True, size=9, color="808080")

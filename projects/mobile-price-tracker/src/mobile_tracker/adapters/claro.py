@@ -67,11 +67,13 @@ def _clean(text: str | None) -> str:
     return " ".join(text.split()) if text else ""
 
 
-def _txt(x) -> str:
-    """Storyblok fields are sometimes ``{"value": …}`` wrappers, sometimes bare strings."""
-    if isinstance(x, dict):
-        return x.get("value") or ""
-    return x if isinstance(x, str) else ""
+# Prezão recarga tiers are described in the prepaid page's rich text as
+# "R$ <recarga>/<validity> dias – <gb>GB" (e.g. "R$ 30/30 dias – 12GB"). The separator is an en/em
+# dash (literal en/em/hyphen, OR an HTML entity like &#8211;/&ndash; in case the CMS serializes it that
+# way); requiring the dash (vs. any gap) avoids matching a GB token from an adjacent sentence. #18
+_DASHES = "–—"   # en dash, em dash (literal)
+_PREZAO_TIER = re.compile(
+    r"R\$\s*(\d+)\s*/\s*(\d+)\s*dias\s*(?:[" + _DASHES + r"\-]|&[#\w]+;)\s*(\d+)\s*GB", re.I)
 
 
 def parse_next_data(data: dict, target: Target, raw_ref: str | None = None) -> list[Plan]:
@@ -148,42 +150,35 @@ def parse_next_data(data: dict, target: Target, raw_ref: str | None = None) -> l
 
 
 def parse_claro_prepaid(data: dict, target: Target, raw_ref: str | None = None) -> list[Plan]:
-    """Claro prepaid (Prezão) uses ``tab_select`` tabs, NOT ``card_360`` (CONTEXT §3). Each Prezão
-    tab carries a daily-price offer ("Prezão R$1 por dia") + a data allowance in its title/content.
-    We capture the Prezão offer(s); the recarga tiers (R$15/20/25/30) are top-up amounts of the same
-    offer, so they are recorded in price_note rather than as separate plans."""
-    dc = data.get("props", {}).get("pageProps", {}).get("dynamicComponents", {}) or {}
+    """Claro prepaid (Prezão): capture the real recarga tiers + validity, NOT the "R$1 por dia"
+    headline the old parser grabbed (#18). The page describes each tier in rich text as
+    "R$ <recarga>/<validity> dias – <gb>GB" (e.g. "R$ 30/30 dias – 12GB" — the 30-day plan; the
+    "R$1 por dia" framing is just R$30 ÷ 30). We extract every tier with its ``validity_days``, keyed
+    by (validity, gb) so the plan_id is NEVER price-derived (CONTEXT §4); on a (validity, gb) collision
+    (e.g. R$30 vs R$35 both 30d/12GB — com/sem anúncio) we keep the cheaper recarga. The Pre matrix
+    column then picks the cheapest 30-day tier (→ R$30/30d/12GB), replacing the R$1 bug. The tiers live
+    in rich text rather than a clean ``card_360``/``tab_select`` field, so this is a regex over the
+    page content — if Claro restructures it, prepaid yields 0 (caught by validation) and the saved raw
+    capture can be re-parsed."""
+    blob = json.dumps(data, ensure_ascii=False)
+    best: dict[tuple[int, int], float] = {}          # (validity_days, gb) -> cheapest recarga seen
+    for recarga, days, gb in _PREZAO_TIER.findall(blob):
+        key = (int(days), int(gb))
+        price = float(recarga)
+        if key not in best or price < best[key]:
+            best[key] = price
     plans: list[Plan] = []
-    seen: set[str] = set()
-    for comp in (dc.get("body", []) or []):
-        if not isinstance(comp, dict) or comp.get("component") != "tab_select":
-            continue
-        for tab in (comp.get("data", {}) or {}).get("data", []) or []:
-            if not isinstance(tab, dict):
-                continue
-            title = _clean(_txt(tab.get("title")))
-            if "prez" not in title.lower():          # only the Prezão tabs are real prepaid plans
-                continue
-            blob = title + " " + json.dumps(tab.get("content"), ensure_ascii=False)
-            dm = re.search(r"R\$\s*(\d+)\s*por\s*dia", blob, re.I)
-            price = float(dm.group(1)) if dm else None
-            if price is None:                        # no daily price → not a usable plan row
-                continue
-            gbm = _GB.search(blob)
-            data_gb = float(gbm.group(1)) if gbm else None
-            plan_id = f"claro:{slugify(title)}"      # no native slug on this layout → deterministic
-            if plan_id in seen:
-                continue
-            seen.add(plan_id)
-            plans.append(BaseAdapter.make_plan(
-                target,
-                plan_name=title,
-                plan_id=plan_id,
-                price_brl=price,
-                data_gb=data_gb,
-                price_note="prepaid Prezão — preço por dia; recargas a partir de R$15",
-                raw_ref=raw_ref,
-            ))
+    for (days, gb), price in sorted(best.items()):
+        plans.append(BaseAdapter.make_plan(
+            target,
+            plan_name=f"Prezão {gb}GB ({days} dias)",
+            plan_id=f"claro:prezao-{days}d-{gb}gb",   # native-free, non-price (validity+gb)
+            price_brl=price,
+            data_gb=float(gb),
+            validity_days=days,
+            price_note=f"recarga Prezão R${int(price)} — validade {days} dias",
+            raw_ref=raw_ref,
+        ))
     return plans
 
 

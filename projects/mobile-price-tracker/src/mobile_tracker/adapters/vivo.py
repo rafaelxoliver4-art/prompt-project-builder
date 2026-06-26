@@ -31,6 +31,7 @@ from ..config import Target
 from ..models import Plan
 
 _GB = re.compile(r"(\d+)\s*GB", re.I)
+_DAYS = re.compile(r"(\d+)\s*dias", re.I)   # prepaid validity in the card text ("30 dias") — #18
 # native offer code (the "Baixar condições da oferta VIV…" code, unique per card; SELF… is a fallback)
 _VIV = re.compile(r"VIV\d{6,}")
 _SELF = re.compile(r"SELF\d{3,}[A-Z0-9]*")
@@ -72,6 +73,13 @@ def parse_vivo_html(html: str, target: Target, raw_ref: str | None = None) -> li
         gb = _GB.search(ben.text()) if ben is not None else None
         data_gb = float(gb.group(1)) if gb else None
 
+        # PREPAID only (#18): the recarga validity ("30 dias") is in the card text. Gated on category
+        # so postpaid/control/lite parsing is untouched (their cards may mention "dias" for trials).
+        validity_days = None
+        if target.category == "prepaid":
+            dm = _DAYS.search(card.text(separator=" ", strip=True) or "")
+            validity_days = int(dm.group(1)) if dm else None
+
         # plan_id = native offer code + data allowance. Prepaid tiers share ONE page-level code
         # (e.g. VIV…22379), so the data amount (non-price) disambiguates them; for postpaid the code
         # is already unique per card and the suffix is harmless.
@@ -112,6 +120,7 @@ def parse_vivo_html(html: str, target: Target, raw_ref: str | None = None) -> li
             price_note=("oferta com desconto" if price_promo else None),
             data_gb=data_gb,
             data_note=data_note,
+            validity_days=validity_days,
             streaming=streaming,
             extra_benefits=extra,
             raw_ref=raw_ref,
