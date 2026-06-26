@@ -52,7 +52,7 @@ RIGHT = Alignment(horizontal="right")
 # tab colors per sheet (engine/flat sheets neutral grey; views + carriers branded)
 TAB_COLORS = {
     "Vivo": "660099", "Claro": "DA291C", "TIM": "0033A0",
-    "comparison": "2E7D32", "Ranking": "1565C0", "summary": "102A43",
+    "comparison": "2E7D32", "Charts": "43A047", "Ranking": "1565C0", "summary": "102A43",
     "history": "8A8A8A", "latest": "8A8A8A", "changes": "8A8A8A",
 }
 
@@ -364,19 +364,23 @@ EVOLUTION_GROUPS = [
 EVOLUTION_CARRIERS = ["tim", "vivo", "claro"]
 EVOLUTION_DISP = {"tim": "TIM", "vivo": "Vivo", "claro": "Claro"}
 CARRIER_LINE = {"tim": "0033A0", "vivo": "660099", "claro": "DA291C"}  # series colors = tab palette
+# Table-only `comparison` layout (#17): group titles row 1, TIM/Vivo/Claro sub-header row 2, months row 3+.
+EVO_HEAD1, EVO_HEAD2, EVO_FIRST = 1, 2, 3
 
 
-def _line_chart(ws, title, c0, head_row, first, last, anchor):
-    """One per-category line chart: X = Date column, 3 series = TIM/Vivo/Claro matrix columns.
-    Data references the live matrix (which reads history), so charts grow as history accumulates."""
+def _line_chart(chart_ws, data_ws, title, c0, head_row, first, last, anchor):
+    """One per-category line chart hosted on `chart_ws` (the `Charts` sheet) but reading the matrix on
+    `data_ws` (the `comparison` sheet) via CROSS-SHEET refs: X = the Month column, 3 series = the
+    TIM/Vivo/Claro matrix columns. References point at the live matrix, so the charts grow as months
+    accumulate; data_ws != chart_ws, so the table sheet stays chart-free (#17)."""
     chart = LineChart()
     chart.title = title
     chart.y_axis.title = "R$"
     chart.x_axis.title = "Month"
     chart.height, chart.width = 7.2, 11.5
     chart.legend.position = "b"
-    data = Reference(ws, min_col=c0, max_col=c0 + 2, min_row=head_row, max_row=last)  # incl. names row
-    cats = Reference(ws, min_col=1, min_row=first, max_row=last)
+    data = Reference(data_ws, min_col=c0, max_col=c0 + 2, min_row=head_row, max_row=last)  # incl. names
+    cats = Reference(data_ws, min_col=1, min_row=first, max_row=last)
     chart.add_data(data, titles_from_data=True)
     chart.set_categories(cats)
     for s, carrier in zip(chart.series, EVOLUTION_CARRIERS):
@@ -384,7 +388,7 @@ def _line_chart(ws, title, c0, head_row, first, last, anchor):
         s.graphicalProperties.line = LineProperties(solidFill=CARRIER_LINE[carrier], w=20000)
         s.marker = Marker(symbol="circle", size=6)
         s.smooth = False
-    ws.add_chart(chart, anchor)
+    chart_ws.add_chart(chart, anchor)
     return chart
 
 
@@ -437,17 +441,19 @@ def _minifs_month(pc, cc, dc, sc, carrier, category, row):
 
 
 def _write_comparison(xl, history: pd.DataFrame):
-    """`comparison` = the price-evolution MATRIX: Date (rows) × category-group × carrier (cols).
-    Every value cell is a LIVE MINIFS formula over the `history` sheet, so the matrix fills in as
-    daily history accumulates (self-connected workbook). 0 (no match) → "" so the heatmap ignores it."""
+    """`comparison` = the price-evolution MATRIX, TABLE ONLY (#17): Month (rows) × category-group ×
+    carrier (cols), starting at the TOP of the sheet (titles row 1, TIM/Vivo/Claro row 2, months row 3+).
+    Every value cell is a LIVE MINIFS formula over the `history` sheet, so the matrix fills in as monthly
+    history accumulates (self-connected workbook). 0 (no match) → "" so the heatmap ignores it. The 4
+    charts now live on the separate `Charts` sheet (#17), so this sheet is a clean, scrollable table —
+    only the 2 header rows + the Month column are frozen (no chart overlay, no 36-row frozen block).
+    Returns (worksheet, last_data_row) so the Charts sheet can reference this matrix."""
     ws = xl.book.create_sheet("comparison")
     _gridless(ws, TAB_COLORS["comparison"])
     pc, cc, dc, sc = _hist_cols()
     ncol = 1 + 3 * len(EVOLUTION_GROUPS)
-    ws.cell(row=1, column=1, value="Price evolution — cheapest R$ per carrier × category, by month") \
-        .font = Font(name=FONT, bold=True, size=14)
 
-    HEAD1, HEAD2, FIRST = 35, 36, 37   # matrix sits BELOW the 2×2 line-chart block at the top
+    HEAD1, HEAD2, FIRST = EVO_HEAD1, EVO_HEAD2, EVO_FIRST   # table at the top: 1 / 2 / 3+
     ws.cell(row=HEAD1, column=1, value="Month")
     ws.merge_cells(start_row=HEAD1, start_column=1, end_row=HEAD2, end_column=1)
     for g, (title, _cat, _kind) in enumerate(EVOLUTION_GROUPS):
@@ -493,11 +499,6 @@ def _write_comparison(xl, history: pd.DataFrame):
             c0 = 2 + g * 3
             rng = f"{get_column_letter(c0)}{FIRST}:{get_column_letter(c0 + 2)}{last}"
             ws.conditional_formatting.add(rng, _price_scale())
-        # 4 per-category line charts in a 2×2 block at the top (price over time; matrix grows below)
-        anchors = ["A2", "J2", "A19", "J19"]
-        for g, (title, _c, _k) in enumerate(EVOLUTION_GROUPS):
-            _line_chart(ws, f"{title.split(' (')[0]} — cheapest R$ over time",
-                        2 + g * 3, HEAD2, FIRST, last, anchors[g])
 
     note = ws.cell(row=last + 2, column=1,
                    value="Rows = month: each cell = cheapest R$ that carrier offered in the category "
@@ -506,12 +507,32 @@ def _write_comparison(xl, history: pd.DataFrame):
                          "filter history's text-stored dates in Excel — CONTEXT §7). Pre = cheapest "
                          "recharge amount (true R$/day needs validity-days we don't yet capture — §8). "
                          "Digital = min of Vivo Lite / Claro Flex. Daily detail stays in `history`; "
-                         "the matrix grows one row per month.")
+                         "the matrix grows one row per month. Charts are on the `Charts` sheet.")
     note.font = Font(name=FONT, italic=True, size=9, color="808080")
-    ws.freeze_panes = f"B{FIRST}"
+    ws.freeze_panes = f"B{FIRST}"      # freeze only the 2 header rows + the Month column (scrolls freely)
+    ws.protection.sheet = False        # explicit: the table is never locked (the #17 "locked view" fix)
     ws.column_dimensions["A"].width = 13
     for c in range(2, ncol + 1):
         ws.column_dimensions[get_column_letter(c)].width = 10
+    return ws, last
+
+
+def _write_charts(xl, comp_ws, first: int, last: int):
+    """`Charts` sheet (#17): the 4 per-category line charts (Control / Post / Pre / Digital) in a 2×2
+    layout, each referencing the `comparison` matrix via cross-sheet refs (so they grow as months
+    accumulate). Keeps the palette / markers / monthly X-axis. Lives apart from the table so the
+    `comparison` sheet opens as a clean, scrollable matrix with no chart overlay."""
+    ws = xl.book.create_sheet("Charts")
+    _gridless(ws, TAB_COLORS["Charts"])
+    ws.cell(row=1, column=1,
+            value="Price evolution — cheapest R$ per carrier × category, by month (source: `comparison`)") \
+        .font = Font(name=FONT, bold=True, size=14)
+    if last >= first:                                  # nothing to chart until ≥1 month exists
+        anchors = ["A3", "J3", "A20", "J20"]           # 2×2 block
+        for g, (title, _c, _k) in enumerate(EVOLUTION_GROUPS):
+            _line_chart(ws, comp_ws, f"{title.split(' (')[0]} — cheapest R$ over time",
+                        2 + g * 3, EVO_HEAD2, first, last, anchors[g])
+    return ws
 
 
 def write_workbook(plans, path: str | Path, run_ts: datetime) -> dict:
@@ -551,9 +572,15 @@ def write_workbook(plans, path: str | Path, run_ts: datetime) -> dict:
                 f"{L}2:{L}{last}", FormulaRule(formula=[f"NOT(ISBLANK({L}2))"], fill=PROMO_FILL))
         _format_sheet(xl.sheets["changes"], (7, 8, 9), tab_color=TAB_COLORS["changes"])
         _write_summary(xl, run_ts, latest_date, len(latest), history["snapshot_date"].nunique())
-        _write_comparison(xl, history)       # price-evolution matrix (live MINIFS over history)
+        comp_ws, comp_last = _write_comparison(xl, history)   # table-only monthly matrix (main view)
+        _write_charts(xl, comp_ws, EVO_FIRST, comp_last)      # 4 line charts on their own sheet (#17)
         _write_ranking(xl, latest)           # validated cross-section (rank-aligned, today)
         _write_operator_sheets(xl, latest)   # one tab per carrier (by-operator catalog view)
+        # Open on the clean `comparison` table, not on `history`: set it active + the only selected tab.
+        comp_idx = xl.book.index(comp_ws)
+        xl.book.active = comp_idx
+        for i, s in enumerate(xl.book.worksheets):
+            s.sheet_view.tabSelected = (i == comp_idx)
 
     return {
         "path": str(path),
