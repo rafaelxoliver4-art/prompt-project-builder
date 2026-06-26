@@ -1,13 +1,11 @@
-"""Offline tests for the MONTHLY price-evolution view (#12/#13/#16/#17).
+"""Offline tests for the DAILY price-evolution view (#12/#13/#16/#17/#18/#19).
 
-#17 SPLIT the view into two sheets: `comparison` is now a TABLE-ONLY monthly matrix at the TOP of the
-sheet (group titles row 1, TIM/Vivo/Claro row 2, months row 3+, frozen at B3, not protected, the active
-sheet on open), and the 4 line charts moved to a separate `Charts` sheet that references the matrix via
-cross-sheet refs. These tests assert: one matrix row per month (first-of-month date, 'mmm-yy' display),
-each value cell a live MINIFS over `history` scoped to that month (text-prefix from the month cell —
-EOMONTH date bounds can't filter history's text-stored dates, see excel_writer/_minifs_month), the
-per-group heatmap, the table/charts split (no chart overlay on `comparison`), the Ranking view, and
-same-day idempotency.
+#19 changed the matrix from MONTHLY rows back to DAILY rows: `comparison` has one row per distinct
+snapshot_date (earliest first), each value cell a live EXACT-date MINIFS over `history` (a locale-safe
+text date built from the row's date — history stores dates as TEXT, see excel_writer/_minifs_day). The
+table-only layout (#17) is unchanged: group titles row 1, TIM/Vivo/Claro row 2, day rows from row 3,
+frozen at B3, not protected, the active sheet; the 4 charts live on the `Charts` sheet via cross-sheet
+refs. The heatmap is now a 2-color green→yellow scale (JPMorgan style), per carrier column, no red.
 """
 import re
 import xml.etree.ElementTree as ET
@@ -20,7 +18,7 @@ import pandas as pd
 from mobile_tracker.excel_writer import write_workbook, evolution_dates, evolution_months
 from mobile_tracker.models import Plan
 
-# Table-only `comparison` (#17): header rows 1/2, month data from row 3 (no chart offset).
+# Table-only `comparison` (#17): header rows 1/2, day data from row 3 (no chart offset).
 H1, H2, FIRST = 1, 2, 3
 
 
@@ -47,79 +45,70 @@ def _mk(carrier, cat, name, price, date_str):
     return p
 
 
-def _two_month(path):
-    """History spanning May + June 2026 → the matrix should have exactly two month rows."""
-    may = [_mk("tim", "postpaid", "TB", 122.0, "2026-05-20"),
-           _mk("vivo", "postpaid", "VP", 150.0, "2026-05-20"),
-           _mk("claro", "postpaid", "CP", 125.0, "2026-05-20"),
-           _mk("vivo", "lite", "EL", 35.0, "2026-05-20"),
-           _mk("claro", "flex", "FX", 50.0, "2026-05-20")]
-    jun = [_mk("tim", "postpaid", "TB", 119.0, "2026-06-22"),
-           _mk("vivo", "postpaid", "VP", 150.0, "2026-06-22"),
-           _mk("claro", "postpaid", "CP", 124.9, "2026-06-22"),
-           _mk("vivo", "lite", "EL", 30.0, "2026-06-22"),
-           _mk("claro", "flex", "FX", 45.0, "2026-06-22")]
-    write_workbook(may, path, datetime(2026, 5, 20, 18))
-    write_workbook(jun, path, datetime(2026, 6, 22, 18))
+def _multi_day(path):
+    """History with 3 distinct snapshot_dates → the matrix should have one row per date, earliest first."""
+    for d, tim, vivo, claro in [("2026-06-22", 122.0, 150.0, 125.0),
+                                ("2026-06-23", 121.0, 150.0, 124.9),
+                                ("2026-06-24", 119.0, 149.0, 124.0)]:
+        plans = [_mk("tim", "postpaid", "TB", tim, d),
+                 _mk("vivo", "postpaid", "VP", vivo, d),
+                 _mk("claro", "postpaid", "CP", claro, d),
+                 _mk("vivo", "lite", "EL", 30.0, d),
+                 _mk("claro", "flex", "FX", 45.0, d)]
+        write_workbook(plans, path, datetime(2026, 6, int(d[-2:]), 18))
     return path
 
 
-def test_matrix_rows_are_months(tmp_path):
-    wb = openpyxl.load_workbook(_two_month(tmp_path / "m.xlsx"))
+def test_matrix_rows_are_days(tmp_path):
+    wb = openpyxl.load_workbook(_multi_day(tmp_path / "m.xlsx"))
     ws = wb["comparison"]
-    assert ws.cell(row=H1, column=1).value == "Month"
+    assert ws.cell(row=H1, column=1).value == "Date"
     titles = [ws.cell(row=H1, column=c).value for c in (2, 5, 8, 11)]
     assert titles == ["Control (R$/mo)", "Post (R$/mo)", "Pre (R$/mo, 30-day)", "Digital (R$/mo)"]
     assert [ws.cell(row=H2, column=c).value for c in (2, 3, 4)] == ["TIM", "Vivo", "Claro"]
-    # one row per month, stored as first-of-month dates, chronological
-    m1 = ws.cell(row=FIRST, column=1).value
-    m2 = ws.cell(row=FIRST + 1, column=1).value
-    assert (m1.year, m1.month, m1.day) == (2026, 5, 1)
-    assert (m2.year, m2.month, m2.day) == (2026, 6, 1)
-    assert ws.cell(row=FIRST + 2, column=1).value is None       # only two months present
+    # one row per snapshot_date, stored as real dates, EARLIEST first
+    d1 = ws.cell(row=FIRST, column=1).value
+    d2 = ws.cell(row=FIRST + 1, column=1).value
+    d3 = ws.cell(row=FIRST + 2, column=1).value
+    assert (d1.year, d1.month, d1.day) == (2026, 6, 22)       # 2026-06-22 is the FIRST row
+    assert (d2.year, d2.month, d2.day) == (2026, 6, 23)
+    assert (d3.year, d3.month, d3.day) == (2026, 6, 24)
+    assert ws.cell(row=FIRST + 3, column=1).value is None       # only three dates present
 
 
-def test_month_cells_display_mmm_yy(tmp_path):
-    wb = openpyxl.load_workbook(_two_month(tmp_path / "m.xlsx"))
-    ws = wb["comparison"]
-    assert ws.cell(row=FIRST, column=1).number_format == "mmm-yy"      # 2026-06-01 → "Jun-26"
-    assert ws.cell(row=FIRST + 1, column=1).number_format == "mmm-yy"
+def test_day_cells_display_dd_mmm(tmp_path):
+    ws = openpyxl.load_workbook(_multi_day(tmp_path / "m.xlsx"))["comparison"]
+    assert ws.cell(row=FIRST, column=1).number_format == "dd-mmm"      # 2026-06-22 → "22-Jun"
+    assert ws.cell(row=FIRST + 2, column=1).number_format == "dd-mmm"
 
 
-def test_value_cells_are_month_scoped_minifs_over_history(tmp_path):
-    wb = openpyxl.load_workbook(_two_month(tmp_path / "m.xlsx"))
-    ws = wb["comparison"]
+def test_value_cells_are_exact_date_minifs_over_history(tmp_path):
+    ws = openpyxl.load_workbook(_multi_day(tmp_path / "m.xlsx"))["comparison"]
     post_tim = ws.cell(row=FIRST, column=5).value          # Post group, TIM column
     assert isinstance(post_tim, str)
     assert "MINIFS" in post_tim and "history!" in post_tim
     assert '"tim"' in post_tim and '"postpaid"' in post_tim
-    # month scope = a text-prefix built from the month cell ($A3), not an exact-date match
-    assert f"YEAR($A{FIRST})" in post_tim and f"MONTH($A{FIRST})" in post_tim and '"-*"' in post_tim
-    # digital = cheapest of lite OR flex, same month scope, via the reciprocal-max min trick
+    # EXACT date = a text date built from the date cell ($A3): YEAR/MONTH/DAY, NO wildcard
+    assert f"YEAR($A{FIRST})" in post_tim and f"DAY($A{FIRST})" in post_tim
+    assert '"-*"' not in post_tim                            # exact date, NOT a month prefix
+    # digital = cheapest of lite OR flex, same exact-date scope, via the reciprocal-max min trick
     digital_vivo = ws.cell(row=FIRST, column=12).value
-    assert '"lite"' in digital_vivo and '"flex"' in digital_vivo and f"MONTH($A{FIRST})" in digital_vivo
+    assert '"lite"' in digital_vivo and '"flex"' in digital_vivo and f"DAY($A{FIRST})" in digital_vivo
     assert "MAX(" in digital_vivo and "1/" in digital_vivo
 
 
-def test_two_snapshots_same_month_roll_up_to_one_row(tmp_path):
-    """The core roll-up: two daily snapshots in the SAME month collapse to ONE matrix row, while the
-    daily detail stays in `history`. (The cheapest-across-days value is verified by real-Excel recalc;
-    offline we assert the structure — one month row, a single month-scoped MINIFS spanning the month.)"""
+def test_distinct_dates_one_row_each(tmp_path):
+    """Daily: two snapshots on DIFFERENT dates → TWO rows (one per date), not a roll-up; history keeps both."""
     out = tmp_path / "m.xlsx"
-    write_workbook([_mk("tim", "postpaid", "TB", 122.0, "2026-06-10"),
-                    _mk("vivo", "postpaid", "VP", 150.0, "2026-06-10")],
-                   out, datetime(2026, 6, 10, 18))
-    write_workbook([_mk("tim", "postpaid", "TB", 118.0, "2026-06-20"),
-                    _mk("vivo", "postpaid", "VP", 150.0, "2026-06-20")],
-                   out, datetime(2026, 6, 20, 18))
+    write_workbook([_mk("tim", "postpaid", "TB", 122.0, "2026-06-22")], out, datetime(2026, 6, 22, 18))
+    write_workbook([_mk("tim", "postpaid", "TB", 118.0, "2026-06-23")], out, datetime(2026, 6, 23, 18))
     ws = openpyxl.load_workbook(out)["comparison"]
-    m1 = ws.cell(row=FIRST, column=1).value
-    assert (m1.year, m1.month, m1.day) == (2026, 6, 1)          # both days → the single Jun row
-    assert ws.cell(row=FIRST + 1, column=1).value is None        # NOT two rows
-    post_tim = ws.cell(row=FIRST, column=5).value
-    assert "MINIFS" in post_tim and f"MONTH($A{FIRST})" in post_tim  # one MINIFS scoped to the whole month
+    d1 = ws.cell(row=FIRST, column=1).value
+    d2 = ws.cell(row=FIRST + 1, column=1).value
+    assert (d1.month, d1.day) == (6, 22) and (d2.month, d2.day) == (6, 23)   # two distinct daily rows
+    assert ws.cell(row=FIRST + 2, column=1).value is None
     hist = pd.read_excel(out, sheet_name="history")
-    assert set(hist["snapshot_date"].astype(str)) == {"2026-06-10", "2026-06-20"}  # daily detail kept
+    assert set(hist["snapshot_date"].astype(str)) == {"2026-06-22", "2026-06-23"}
 
 
 def _mk_pre(carrier, name, price, date_str, validity):
@@ -130,18 +119,17 @@ def _mk_pre(carrier, name, price, date_str, validity):
 
 def test_pre_column_filters_30day_validity(tmp_path):
     """#18: the Pre cell is a MINIFS that ALSO filters validity_days >= 28, so it picks the cheapest
-    30-DAY prepaid plan — not a cheaper short-validity tier (the old R$1/day-style bug)."""
+    30-DAY prepaid plan on that date — not a cheaper short-validity tier (the old R$1/day-style bug)."""
     from openpyxl.utils import get_column_letter
     from mobile_tracker.models import COLUMNS
     out = tmp_path / "m.xlsx"
-    # Claro: a cheaper 15-day tier AND the real 30-day tier in the same month → Pre must pick the 30-day.
+    # Claro: a cheaper 15-day tier AND the real 30-day tier on the same date → Pre must pick the 30-day.
     write_workbook([
         _mk_pre("claro", "Prezão 5GB (15d)", 15.0, "2026-06-22", 15),
         _mk_pre("claro", "Prezão 12GB (30d)", 30.0, "2026-06-22", 30),
     ], out, datetime(2026, 6, 22, 18))
     wb = openpyxl.load_workbook(out)
-    # history carries the new validity_days column
-    assert "validity_days" in [c.value for c in wb["history"][1]]
+    assert "validity_days" in [c.value for c in wb["history"][1]]    # history carries the column
     ws = wb["comparison"]
     pre_claro = ws.cell(row=FIRST, column=10).value     # Pre group cols 8/9/10 = TIM/Vivo/Claro
     assert isinstance(pre_claro, str) and "MINIFS" in pre_claro and '"prepaid"' in pre_claro
@@ -149,25 +137,55 @@ def test_pre_column_filters_30day_validity(tmp_path):
     assert f'history!${vcol}:${vcol},">=28"' in pre_claro    # the 30-day validity filter
 
 
-def test_evolution_months_year_boundary():
-    """Dec→Jan rolls over correctly: sorted by (year, month), distinct first-of-month dates."""
-    hist = pd.DataFrame({"snapshot_date": ["2027-01-05", "2026-12-20", "2026-12-31", "2027-01-28"]})
-    assert evolution_months(hist) == [date(2026, 12, 1), date(2027, 1, 1)]
-
-
 def test_heatmap_colorscale_present(tmp_path):
-    wb = openpyxl.load_workbook(_two_month(tmp_path / "m.xlsx"))
+    wb = openpyxl.load_workbook(_multi_day(tmp_path / "m.xlsx"))
     assert len(list(wb["comparison"].conditional_formatting)) >= 1
 
 
-def test_four_line_charts_reference_monthly_matrix(tmp_path):
-    out = _two_month(tmp_path / "m.xlsx")
+def test_heatmap_is_green_yellow_2color_no_red(tmp_path):
+    """#19: comparison heatmap = a 2-colour green→yellow scale (JPMorgan style), per column, NO red."""
+    ws = openpyxl.load_workbook(_multi_day(tmp_path / "m.xlsx"))["comparison"]
+    scales = []
+    for cf in ws.conditional_formatting:
+        for rule in cf.rules:
+            if rule.type == "colorScale" and rule.colorScale is not None:
+                scales.append([str(c.rgb) for c in rule.colorScale.color])
+    assert scales, "no color-scale rules on comparison"
+    for colors in scales:
+        assert len(colors) == 2                              # 2-colour (not the 3-colour red scale)
+    flat = "".join(c for s in scales for c in s)
+    assert "A9D08E" in flat and "FFE699" in flat             # soft green (cheaper) + soft yellow (pricier)
+    assert "F8696B" not in flat                              # no red
+
+
+def _color_scales(ws):
+    out = []
+    for cf in ws.conditional_formatting:
+        for rule in cf.rules:
+            if rule.type == "colorScale" and rule.colorScale is not None:
+                out.append([str(c.rgb) for c in rule.colorScale.color])
+    return out
+
+
+def test_other_sheets_keep_3color_red_scale(tmp_path):
+    """#19: ONLY `comparison` switched to green→yellow; latest / Ranking keep the 3-colour RED scale."""
+    wb = openpyxl.load_workbook(_multi_day(tmp_path / "m.xlsx"))
+    for name in ("latest", "Ranking"):
+        scales = _color_scales(wb[name])
+        assert scales, f"{name} has no color-scale rule"
+        flat = "".join(c for s in scales for c in s)
+        assert "F8696B" in flat                             # the red end colour is retained
+        assert any(len(s) == 3 for s in scales)             # still a 3-colour scale (not the 2-colour one)
+
+
+def test_four_line_charts_reference_daily_matrix(tmp_path):
+    out = _multi_day(tmp_path / "m.xlsx")
     with zipfile.ZipFile(out) as z:
         xmls = [z.read(n).decode("utf-8")
                 for n in z.namelist() if re.match(r"xl/charts/chart\d+\.xml$", n)]
     assert len(xmls) == 4                                       # Control / Post / Pre / Digital
     for xml in xmls:
-        assert "'comparison'!$A" in xml                         # X = the Month column
+        assert "'comparison'!$A" in xml                         # X = the Date column
         series_vals = re.findall(r"'comparison'!\$[B-M]\$\d+:\$[B-M]\$\d+", xml)
         assert len(series_vals) >= 3                            # TIM/Vivo/Claro value ranges (data rows)
         # series NAMES resolve to the row-2 carrier header (titles_from_data) → legend shows TIM/Vivo/Claro
@@ -182,7 +200,7 @@ def test_four_line_charts_reference_monthly_matrix(tmp_path):
 
 def test_charts_sheet_exists_and_comparison_is_table_only(tmp_path):
     """#17: the 4 charts hang off the `Charts` sheet; `comparison` is a chart-free table."""
-    out = _two_month(tmp_path / "m.xlsx")
+    out = _multi_day(tmp_path / "m.xlsx")
     assert "Charts" in openpyxl.load_workbook(out).sheetnames
     with zipfile.ZipFile(out) as z:
         comp_xml = z.read(_sheet_xml_path(z, "comparison")).decode("utf-8")
@@ -193,35 +211,34 @@ def test_charts_sheet_exists_and_comparison_is_table_only(tmp_path):
 
 def test_comparison_is_active_sheet(tmp_path):
     """Opening the workbook lands on the clean `comparison` table, not on `history`."""
-    wb = openpyxl.load_workbook(_two_month(tmp_path / "m.xlsx"))
+    wb = openpyxl.load_workbook(_multi_day(tmp_path / "m.xlsx"))
     assert wb.active.title == "comparison"
-    # and it is the ONLY selected tab, so Excel actually opens on it
     selected = [ws.title for ws in wb.worksheets if ws.sheet_view.tabSelected]
-    assert selected == ["comparison"]
+    assert selected == ["comparison"]              # the ONLY selected tab → Excel opens on it
 
 
 def test_comparison_table_only_frozen_b3_and_not_protected(tmp_path):
-    """The 'locked' symptom is gone: header frozen at B3 (not a 36-row block), sheet never protected."""
-    ws = openpyxl.load_workbook(_two_month(tmp_path / "m.xlsx"))["comparison"]
+    """The 'locked' symptom is gone: header frozen at B3, sheet never protected, table starts at the top."""
+    ws = openpyxl.load_workbook(_multi_day(tmp_path / "m.xlsx"))["comparison"]
     assert ws.freeze_panes == "B3"
     assert ws.protection.sheet is False
-    # the table truly starts at the top — header at row 1, data at row 3 (no chart offset)
-    assert ws.cell(row=1, column=1).value == "Month"
-    assert ws.cell(row=FIRST, column=1).value is not None
+    assert ws.cell(row=1, column=1).value == "Date"            # header at row 1
+    assert ws.cell(row=FIRST, column=1).value is not None      # data at row 3
 
 
 def test_ranking_view_preserved(tmp_path):
-    wb = openpyxl.load_workbook(_two_month(tmp_path / "m.xlsx"))
+    wb = openpyxl.load_workbook(_multi_day(tmp_path / "m.xlsx"))
     assert "Ranking" in wb.sheetnames
     assert wb["Ranking"].cell(row=1, column=1).value.startswith("Ranking")
 
 
 def test_evolution_dates_helper():
     hist = pd.DataFrame({"snapshot_date": ["2026-06-22", "2026-06-21", "2026-06-22", None]})
-    assert evolution_dates(hist) == ["2026-06-21", "2026-06-22"]
+    assert evolution_dates(hist) == ["2026-06-21", "2026-06-22"]    # distinct, earliest first
 
 
 def test_evolution_months_helper():
+    # evolution_months is retained as a helper (no longer used by the daily matrix).
     hist = pd.DataFrame(
         {"snapshot_date": ["2026-06-22", "2026-05-01", "2026-06-10", "2026-07-30", None]})
     assert evolution_months(hist) == [date(2026, 5, 1), date(2026, 6, 1), date(2026, 7, 1)]

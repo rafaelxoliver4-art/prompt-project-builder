@@ -58,10 +58,19 @@ TAB_COLORS = {
 
 
 def _price_scale() -> ColorScaleRule:
-    """3-colour scale: green = cheap (low) → yellow → red = expensive (high)."""
+    """3-colour scale: green = cheap (low) → yellow → red = expensive (high).
+    Used by latest / operator / Ranking sheets. The comparison matrix uses the 2-colour scale below."""
     return ColorScaleRule(start_type="min", start_color="63BE7B",
                           mid_type="percentile", mid_value=50, mid_color="FFEB84",
                           end_type="max", end_color="F8696B")
+
+
+def _price_scale_2color() -> ColorScaleRule:
+    """2-colour green→yellow scale (JPMorgan style, #19): green = cheaper (min) → yellow = pricier (max),
+    no red. Applied PER CARRIER COLUMN on the comparison matrix so each carrier's price evolution reads
+    down its own column (each column scaled by its own min/max). Soft, professional shades."""
+    return ColorScaleRule(start_type="min", start_color="A9D08E",   # soft green = cheaper
+                          end_type="max", end_color="FFE699")        # soft yellow = pricier
 
 
 def _gridless(ws, tab_color: str | None = None):
@@ -376,19 +385,19 @@ PREPAID_MIN_VALIDITY_DAYS = 28
 EVOLUTION_CARRIERS = ["tim", "vivo", "claro"]
 EVOLUTION_DISP = {"tim": "TIM", "vivo": "Vivo", "claro": "Claro"}
 CARRIER_LINE = {"tim": "0033A0", "vivo": "660099", "claro": "DA291C"}  # series colors = tab palette
-# Table-only `comparison` layout (#17): group titles row 1, TIM/Vivo/Claro sub-header row 2, months row 3+.
+# Table-only `comparison` layout (#17): group titles row 1, TIM/Vivo/Claro sub-header row 2, day rows 3+.
 EVO_HEAD1, EVO_HEAD2, EVO_FIRST = 1, 2, 3
 
 
 def _line_chart(chart_ws, data_ws, title, c0, head_row, first, last, anchor):
     """One per-category line chart hosted on `chart_ws` (the `Charts` sheet) but reading the matrix on
-    `data_ws` (the `comparison` sheet) via CROSS-SHEET refs: X = the Month column, 3 series = the
-    TIM/Vivo/Claro matrix columns. References point at the live matrix, so the charts grow as months
-    accumulate; data_ws != chart_ws, so the table sheet stays chart-free (#17)."""
+    `data_ws` (the `comparison` sheet) via CROSS-SHEET refs: X = the Date column, 3 series = the
+    TIM/Vivo/Claro matrix columns. References point at the live matrix, so the charts grow as days
+    accumulate; data_ws != chart_ws, so the table sheet stays chart-free (#17/#19)."""
     chart = LineChart()
     chart.title = title
     chart.y_axis.title = "R$"
-    chart.x_axis.title = "Month"
+    chart.x_axis.title = "Date"
     chart.height, chart.width = 7.2, 11.5
     chart.legend.position = "b"
     data = Reference(data_ws, min_col=c0, max_col=c0 + 2, min_row=head_row, max_row=last)  # incl. names
@@ -434,34 +443,33 @@ def _hist_cols():
             get_column_letter(COLUMNS.index("snapshot_date") + 1))
 
 
-def _minifs_month(pc, cc, dc, sc, carrier, category, row, extra_crit=""):
-    """Cheapest price `carrier` offered in `category` DURING the month whose first day sits in $A{row},
-    computed live over the `history` sheet. The month scope is a MINIFS text-prefix over history's
-    snapshot_date — every history row whose ISO date starts with this month's "YYYY-MM-". `extra_crit`
-    appends one more MINIFS criteria pair (used by the Pre column to add validity_days >= 28). #18
+def _minifs_day(pc, cc, dc, sc, carrier, category, row, extra_crit=""):
+    """Cheapest price `carrier` offered in `category` ON the EXACT date in $A{row}, computed live over
+    the `history` sheet. The matrix is DAILY (#19): one row per snapshot_date. `extra_crit` appends one
+    more MINIFS criteria pair (the Pre column adds validity_days >= 28, #18).
 
-    Why a prefix and not EOMONTH date-range bounds: history stores snapshot_date as TEXT, and Excel
-    coerces any date/serial comparison criterion (incl. `">="&EOMONTH(...)`) to a number that never
-    matches a text column — verified to return blank in real Excel. The prefix wildcard is the only
-    construction that filters the text dates correctly. The prefix is built from YEAR()/MONTH() + a
-    numeric "00" format (NOT the "yyyy"/"mm" date codes, which Excel LOCALIZES — pt-BR uses "aaaa"),
-    so it is locale-independent. (CONTEXT §7)"""
-    prefix = f'YEAR($A{row})&"-"&TEXT(MONTH($A{row}),"00")&"-*"'
+    Why a built text date and not the date cell / a >= bound: history stores snapshot_date as TEXT, and
+    Excel coerces a date/serial comparison criterion to a number that never matches a text column —
+    verified blank in real Excel (#16). So we match history's text date with an EXACT text date built
+    from the row's DATE cell: YEAR()&"-"&TEXT(MONTH(),"00")&"-"&TEXT(DAY(),"00") → "2026-06-22" (no
+    wildcard). The numeric "00" format keeps it locale-independent (NOT "yyyy"/"mm"/"dd" date codes,
+    which pt-BR Excel localizes). (CONTEXT §7)"""
+    daystr = (f'YEAR($A{row})&"-"&TEXT(MONTH($A{row}),"00")&"-"&TEXT(DAY($A{row}),"00")')
     return (f'_xlfn.MINIFS(history!${pc}:${pc},'
             f'history!${cc}:${cc},"{carrier}",'
             f'history!${dc}:${dc},"{category}",'
-            f'history!${sc}:${sc},{prefix}'
+            f'history!${sc}:${sc},{daystr}'
             f'{extra_crit})')
 
 
 def _write_comparison(xl, history: pd.DataFrame):
-    """`comparison` = the price-evolution MATRIX, TABLE ONLY (#17): Month (rows) × category-group ×
-    carrier (cols), starting at the TOP of the sheet (titles row 1, TIM/Vivo/Claro row 2, months row 3+).
-    Every value cell is a LIVE MINIFS formula over the `history` sheet, so the matrix fills in as monthly
-    history accumulates (self-connected workbook). 0 (no match) → "" so the heatmap ignores it. The 4
-    charts now live on the separate `Charts` sheet (#17), so this sheet is a clean, scrollable table —
-    only the 2 header rows + the Month column are frozen (no chart overlay, no 36-row frozen block).
-    Returns (worksheet, last_data_row) so the Charts sheet can reference this matrix."""
+    """`comparison` = the price-evolution MATRIX, TABLE ONLY (#17), DAILY rows (#19): Date (one row per
+    snapshot_date, earliest first) × category-group × carrier (cols), starting at the TOP of the sheet
+    (titles row 1, TIM/Vivo/Claro row 2, days row 3+). Every value cell is a LIVE exact-date MINIFS over
+    the `history` sheet, so the matrix grows one row per day and auto-populates as the daily job adds
+    snapshots (self-connected workbook). 0 (no match) → "" so the heatmap ignores it. The 4 charts live
+    on the separate `Charts` sheet (#17), so this sheet is a clean, scrollable table — only the 2 header
+    rows + the Date column are frozen. Returns (worksheet, last_data_row) so Charts can reference it."""
     ws = xl.book.create_sheet("comparison")
     _gridless(ws, TAB_COLORS["comparison"])
     pc, cc, dc, sc = _hist_cols()
@@ -469,7 +477,7 @@ def _write_comparison(xl, history: pd.DataFrame):
     ncol = 1 + 3 * len(EVOLUTION_GROUPS)
 
     HEAD1, HEAD2, FIRST = EVO_HEAD1, EVO_HEAD2, EVO_FIRST   # table at the top: 1 / 2 / 3+
-    ws.cell(row=HEAD1, column=1, value="Month")
+    ws.cell(row=HEAD1, column=1, value="Date")
     ws.merge_cells(start_row=HEAD1, start_column=1, end_row=HEAD2, end_column=1)
     for g, (title, _cat, _kind) in enumerate(EVOLUTION_GROUPS):
         c0 = 2 + g * 3
@@ -485,26 +493,30 @@ def _write_comparison(xl, history: pd.DataFrame):
         ws.cell(row=HEAD2, column=c).alignment = Alignment(vertical="center", horizontal="center")
 
     r = FIRST
-    for first_of_month in evolution_months(history):       # one row per MONTH (Figure-5 roll-up)
-        mcell = ws.cell(row=r, column=1, value=first_of_month)
-        mcell.number_format = "mmm-yy"                      # 2026-06-01 → "Jun-26"
-        mcell.font = Font(name=FONT)
+    for d_str in evolution_dates(history):                  # one row per snapshot_date, earliest first (#19)
+        try:
+            day = date.fromisoformat(str(d_str)[:10])
+        except (ValueError, TypeError):
+            continue
+        dcell = ws.cell(row=r, column=1, value=day)
+        dcell.number_format = "dd-mmm"                      # 2026-06-22 → "22-Jun"
+        dcell.font = Font(name=FONT)
         for g, (title, category, kind) in enumerate(EVOLUTION_GROUPS):
             c0 = 2 + g * 3
             for k, carrier in enumerate(EVOLUTION_CARRIERS):
                 if kind == "single":
-                    m = _minifs_month(pc, cc, dc, sc, carrier, category, r)
+                    m = _minifs_day(pc, cc, dc, sc, carrier, category, r)
                     formula = f'=IFERROR(IF({m}=0,"",{m}),"")'
                 elif kind == "prepaid30":   # cheapest 30-day prepaid plan (validity_days >= 28) — #18
                     crit = f',history!${vc}:${vc},">={PREPAID_MIN_VALIDITY_DAYS}"'
-                    m = _minifs_month(pc, cc, dc, sc, carrier, "prepaid", r, extra_crit=crit)
+                    m = _minifs_day(pc, cc, dc, sc, carrier, "prepaid", r, extra_crit=crit)
                     formula = f'=IFERROR(IF({m}=0,"",{m}),"")'
-                else:  # digital = cheapest of lite OR flex that month; "" if the carrier has neither.
-                    # reciprocal-max picks the smaller positive price: a month's MINIFS returns 0 on
+                else:  # digital = cheapest of lite OR flex that day; "" if the carrier has neither.
+                    # reciprocal-max picks the smaller positive price: a day's MINIFS returns 0 on
                     # no-match (and no real plan is priced 0), so 1/0 → IFERROR → 0, and MAX keeps the
                     # larger reciprocal = the smaller price; both absent → MAX(0,0)=0 → 1/0 → "".
-                    lite = _minifs_month(pc, cc, dc, sc, carrier, "lite", r)
-                    flex = _minifs_month(pc, cc, dc, sc, carrier, "flex", r)
+                    lite = _minifs_day(pc, cc, dc, sc, carrier, "lite", r)
+                    flex = _minifs_day(pc, cc, dc, sc, carrier, "flex", r)
                     formula = f'=IFERROR(1/MAX(IFERROR(1/{lite},0),IFERROR(1/{flex},0)),"")'
                 cell = ws.cell(row=r, column=c0 + k, value=formula)
                 cell.number_format = CURRENCY_FMT
@@ -513,22 +525,22 @@ def _write_comparison(xl, history: pd.DataFrame):
         r += 1
     last = r - 1
 
-    if last >= FIRST:                                  # per-group heatmap (green cheap → red dear)
-        for g in range(len(EVOLUTION_GROUPS)):
-            c0 = 2 + g * 3
-            rng = f"{get_column_letter(c0)}{FIRST}:{get_column_letter(c0 + 2)}{last}"
-            ws.conditional_formatting.add(rng, _price_scale())
+    if last >= FIRST:    # per-CARRIER-COLUMN heatmap: green→yellow, each column by its own min/max (#19)
+        for c in range(2, ncol + 1):
+            L = get_column_letter(c)
+            ws.conditional_formatting.add(f"{L}{FIRST}:{L}{last}", _price_scale_2color())
 
     note = ws.cell(row=last + 2, column=1,
-                   value="Rows = month: each cell = cheapest R$ that carrier offered in the category "
-                         "DURING the month — a live MINIFS over the daily `history` sheet (month scope "
-                         "= a text-prefix over history's ISO dates; EOMONTH date-range bounds can't "
-                         "filter history's text-stored dates in Excel — CONTEXT §7). Pre = cheapest "
-                         "30-day prepaid plan (validity_days >= 28), shown as its monthly R$/mo (#18). "
-                         "Digital = min of Vivo Lite / Claro Flex. Daily detail stays in `history`; "
-                         "the matrix grows one row per month. Charts are on the `Charts` sheet.")
+                   value="Rows = day: each cell = cheapest R$ that carrier offered in the category on "
+                         "that snapshot_date — a live MINIFS over `history` matching the EXACT date (a "
+                         "locale-safe text date built from the row's date, since history stores dates as "
+                         "TEXT — CONTEXT §7). Pre = cheapest 30-day prepaid plan (validity_days >= 28; "
+                         "pre-#18 dates have no validity → blank, fills from 26-Jun on). Digital = min of "
+                         "Vivo Lite / Claro Flex. Heatmap = per-column green→yellow (subtle while prices "
+                         "are near-flat; differentiates as they move). Grows one row per day; charts on "
+                         "the `Charts` sheet.")
     note.font = Font(name=FONT, italic=True, size=9, color="808080")
-    ws.freeze_panes = f"B{FIRST}"      # freeze only the 2 header rows + the Month column (scrolls freely)
+    ws.freeze_panes = f"B{FIRST}"      # freeze only the 2 header rows + the Date column (scrolls freely)
     ws.protection.sheet = False        # explicit: the table is never locked (the #17 "locked view" fix)
     ws.column_dimensions["A"].width = 13
     for c in range(2, ncol + 1):
@@ -538,15 +550,15 @@ def _write_comparison(xl, history: pd.DataFrame):
 
 def _write_charts(xl, comp_ws, first: int, last: int):
     """`Charts` sheet (#17): the 4 per-category line charts (Control / Post / Pre / Digital) in a 2×2
-    layout, each referencing the `comparison` matrix via cross-sheet refs (so they grow as months
-    accumulate). Keeps the palette / markers / monthly X-axis. Lives apart from the table so the
+    layout, each referencing the `comparison` matrix via cross-sheet refs (so they grow as days
+    accumulate, #19). Keeps the palette / markers / daily X-axis. Lives apart from the table so the
     `comparison` sheet opens as a clean, scrollable matrix with no chart overlay."""
     ws = xl.book.create_sheet("Charts")
     _gridless(ws, TAB_COLORS["Charts"])
     ws.cell(row=1, column=1,
-            value="Price evolution — cheapest R$ per carrier × category, by month (source: `comparison`)") \
+            value="Price evolution — cheapest R$ per carrier × category, by day (source: `comparison`)") \
         .font = Font(name=FONT, bold=True, size=14)
-    if last >= first:                                  # nothing to chart until ≥1 month exists
+    if last >= first:                                  # nothing to chart until ≥1 day exists
         anchors = ["A3", "J3", "A20", "J20"]           # 2×2 block
         for g, (title, _c, _k) in enumerate(EVOLUTION_GROUPS):
             _line_chart(ws, comp_ws, f"{title.split(' (')[0]} — cheapest R$ over time",
@@ -591,7 +603,7 @@ def write_workbook(plans, path: str | Path, run_ts: datetime) -> dict:
                 f"{L}2:{L}{last}", FormulaRule(formula=[f"NOT(ISBLANK({L}2))"], fill=PROMO_FILL))
         _format_sheet(xl.sheets["changes"], (7, 8, 9), tab_color=TAB_COLORS["changes"])
         _write_summary(xl, run_ts, latest_date, len(latest), history["snapshot_date"].nunique())
-        comp_ws, comp_last = _write_comparison(xl, history)   # table-only monthly matrix (main view)
+        comp_ws, comp_last = _write_comparison(xl, history)   # table-only daily matrix (main view)
         _write_charts(xl, comp_ws, EVO_FIRST, comp_last)      # 4 line charts on their own sheet (#17)
         _write_ranking(xl, latest)           # validated cross-section (rank-aligned, today)
         _write_operator_sheets(xl, latest)   # one tab per carrier (by-operator catalog view)
