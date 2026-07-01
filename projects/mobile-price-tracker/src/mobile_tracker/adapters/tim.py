@@ -36,7 +36,22 @@ from ..config import Target
 from ..models import Plan
 
 _GB = re.compile(r"(\d+)\s*GB", re.I)
-_DAYS = re.compile(r"(\d+)\s*dias", re.I)   # prepaid validity (#18)
+# Per-oferta prepaid validity: each oferta's OWN "R$<recarga> … (por | válido[s] por) <N> dias". A shared
+# marketing line ("recarga de R$30 válidos por 30 dias") appears in EVERY oferta, so #18's MAX-"N dias"
+# wrongly inflated all to 30. We match THIS oferta's recarga amount. Audit #22: R$20→17, R$25→22, R$30→30.
+_TIM_TIER = re.compile(r"R\$\s*(\d+)[^\d]{0,45}?(?:por|v[aá]lid[oa]s?\s+por)\s+(\d+)\s*dias", re.I)
+
+
+def _prepaid_validity(oferta_text: str, price: float | None) -> int | None:
+    """Validity (days) for THIS prepaid oferta = the "R$<recarga> … por <N> dias" phrase whose recarga
+    matches the oferta's own price — NOT the max "N dias" anywhere (the #18 bug: a shared 30-day line
+    inflated every oferta to 30). Returns None if no matching phrase (cell stays blank). (#22/#23)"""
+    if price is None:
+        return None
+    pairs: dict[int, int] = {}
+    for p, d in _TIM_TIER.findall(oferta_text):
+        pairs.setdefault(int(p), int(d))          # first N-dias seen per recarga amount
+    return pairs.get(int(price))
 
 
 def _price_brl(value) -> float | None:
@@ -104,15 +119,12 @@ def parse_tim_html(html: str, target: Target, raw_ref: str | None = None) -> lis
             continue
         gb = _GB.search(name)
         data_gb = float(gb.group(1)) if gb else None
-        # PREPAID only (#18): TIM Pré XIP plans have NO clean structured validity field — the period
-        # lives in the oferta's benefits-modal HTML ("...por 30 dias..." + shorter promo bonuses). We
-        # take the MAX "N dias" in the oferta (the plan period; bonuses are <= it). Gated on category so
-        # postpaid/control parsing is untouched. Fragile (HTML text, not a field) — documented, and the
-        # raw capture is retained for re-parsing if TIM restructures.
+        # PREPAID only: validity has NO clean structured field — it's in the oferta's benefits text
+        # ("R$20, válidos por 17 dias"). Parse THIS oferta's own recarga→days (not the max — see
+        # _prepaid_validity / #22). Gated on category so postpaid/control parsing is untouched.
         validity_days = None
         if target.category == "prepaid":
-            days = [int(d) for d in _DAYS.findall(json.dumps(o, ensure_ascii=False))]
-            validity_days = max(days) if days else None
+            validity_days = _prepaid_validity(json.dumps(o, ensure_ascii=False), price)
         # native Drupal node id (e.g. "155891"); fall back to the SKU field, then a name slug
         nid = _field(o, "nid")
         if nid and str(nid).strip():

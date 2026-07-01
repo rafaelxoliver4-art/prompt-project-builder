@@ -88,13 +88,28 @@ def parse_vivo_html(html: str, target: Target, raw_ref: str | None = None) -> li
         gbtok = f"{int(data_gb)}gb" if data_gb else "x"
         plan_id = f"vivo:{base}-{gbtok}"
 
-        # promo: a struck-through original price in .unique-card__price-old (hidden when no promo)
-        old_el = card.css_first(".unique-card__price-old")
-        old = _price_from(old_el.text()) if old_el is not None else None
-        if old and old != price:
-            price_brl, price_promo = old, price       # regular vs. effective (discounted)
+        loyalty_months = None
+        if target.category == "lite":
+            # Vivo Lite (#23): Easy Lite has an annual/monthly toggle. The render clicks "Sem fidelidade"
+            # so the displayed price (`.total-card-price-value` text) is the NO-COMMITMENT monthly (~R$45),
+            # while `data-original-price` keeps the 12-month LOYALTY price (~R$30). Headline = the no-strings
+            # monthly (JPMorgan comparability); loyalty kept as the promo. Cards without the toggle are
+            # single-price (text == data-original-price → no promo).
+            attrs = price_el.attributes if price_el is not None else {}
+            loyalty = _price_from(attrs.get("data-original-price"))
+            if loyalty and loyalty != price:
+                price_brl, price_promo, loyalty_months = price, loyalty, 12
+                note = "preço sem fidelidade; fidelidade 12m no promo"
+            else:
+                price_brl, price_promo, note = price, None, None
         else:
-            price_brl, price_promo = price, None
+            # promo: a struck-through original price in .unique-card__price-old (hidden when no promo)
+            old_el = card.css_first(".unique-card__price-old")
+            old = _price_from(old_el.text()) if old_el is not None else None
+            if old and old != price:
+                price_brl, price_promo, note = old, price, "oferta com desconto"
+            else:
+                price_brl, price_promo, note = price, None, None
 
         switch = card.css_first(".unique-card__switch-list")
         data_note = _clean(switch.text()) if switch is not None else None
@@ -117,10 +132,11 @@ def parse_vivo_html(html: str, target: Target, raw_ref: str | None = None) -> li
             plan_id=plan_id,
             price_brl=price_brl,
             price_promo_brl=price_promo,
-            price_note=("oferta com desconto" if price_promo else None),
+            price_note=note,
             data_gb=data_gb,
             data_note=data_note,
             validity_days=validity_days,
+            loyalty_months=loyalty_months,
             streaming=streaming,
             extra_benefits=extra,
             raw_ref=raw_ref,
@@ -134,11 +150,11 @@ class VivoAdapter(BaseAdapter):
     def fetch(self, target: Target) -> list[Plan]:
         time.sleep(random.uniform(self.cfg.get("min_delay_seconds", 2),
                                   self.cfg.get("max_delay_seconds", 6)))
-        html = self._render(target.url)
+        html = self._render(target.url, target.category)
         raw_ref = self._save_raw(target, html)
         return parse_vivo_html(html, target, raw_ref=raw_ref)
 
-    def _render(self, url: str) -> str:
+    def _render(self, url: str, category: str | None = None) -> str:
         # Imported lazily so the module (and the pure parser) import fine without a browser.
         from playwright.sync_api import sync_playwright
 
@@ -165,9 +181,30 @@ class VivoAdapter(BaseAdapter):
                     page.wait_for_selector(".unique-card", timeout=15000)
                 except Exception:
                     pass  # parser will report zero plans if the grid never rendered
+                if category == "lite":
+                    self._toggle_lite_no_commitment(page)   # #23: reveal the no-commitment monthly price
                 return page.content()
             finally:
                 browser.close()
+
+    @staticmethod
+    def _toggle_lite_no_commitment(page) -> None:
+        """Vivo Lite (#23): click each Easy Lite card's "Sem fidelidade" (no-commitment) toggle so
+        `.total-card-price-value` shows the no-strings monthly price (~R$45); `data-original-price` keeps
+        the 12-month loyalty price for the parser to record as the promo. Cards without the toggle stay
+        single-price. Best-effort — a card that won't toggle just keeps its default (loyalty) price."""
+        clicked = 0
+        try:
+            for el in page.query_selector_all('text=/Sem fidelidade/i'):
+                try:
+                    el.click(timeout=2500)
+                    clicked += 1
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        if clicked:
+            page.wait_for_timeout(2000)             # let the toggled prices re-render
 
     def _save_raw(self, target: Target, html: str) -> str:
         d = Path(self.settings.raw_capture_dir)

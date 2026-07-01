@@ -71,25 +71,24 @@ def test_control_plans_have_no_validity():
     assert all(p.validity_days is None for p in _plans())
 
 
-def test_prepaid_validity_days_is_max_of_dias():
-    # #18: TIM prepaid (XIP) has NO clean structured validity field — validity is parsed as the MAX
-    # "N dias" in the oferta (the plan period; shorter promo bonuses don't win). Gated on prepaid.
+def test_prepaid_validity_days_is_per_oferta_not_max():
+    # #23 (fixes #18's bug): TIM prepaid validity = THIS oferta's OWN "R$<recarga> … por <N> dias", NOT
+    # the max "N dias" anywhere. A shared marketing line ("recarga de R$30 válidos por 30 dias") appears
+    # in every oferta and fooled the old max heuristic into 30 for all. Audit #22: R$20 → 17 days.
     import json
     settings = {"ofertas": [{
         "nid": [{"value": "59906"}],
         "title": [{"value": "2 Card - TIM Pré XIP Plus - 6GB - [PROD]"}],
         "field_preco_card_oferta": [{"value": "20,00"}],
-        # validity lives in the benefits-modal HTML: a 30-day plan with a shorter promo bonus
-        "field_layout_canvas_segundo": [{"value": "benefícios válidos por 30 dias; bônus de 5GB por 17 dias"}],
+        # this oferta's OWN validity (17d) + the shared 30-day marketing line that inflated #18's max
+        "field_layout_canvas_segundo": [{"value":
+            "6GB por R$20, válidos por 17 dias. Ou faça uma recarga de R$30 válidos por 30 dias."}],
     }]}
     html = ('<script data-drupal-selector="drupal-settings-json" type="application/json">'
             + json.dumps(settings, ensure_ascii=False) + "</script>")
     t = Target(carrier="tim", render="html", category="prepaid", category_label="Pré-pago",
                state="SP", url="https://www.tim.com.br/sp/para-voce/planos/pre-pago")
-    plans = parse_tim_html(html, t, raw_ref="fx")
-    assert len(plans) == 1
-    p = plans[0]
+    p = parse_tim_html(html, t, raw_ref="fx")[0]
     assert p.category == "prepaid"
-    assert p.validity_days == 30          # max(30, 17) — the plan period, not the 17-day bonus
-    assert p.data_gb == 6.0 and p.price_brl == 20.0
-    assert p.plan_id == "tim:59906"
+    assert p.validity_days == 17          # its OWN 17d — NOT the shared 30d (the #18 bug)
+    assert p.data_gb == 6.0 and p.price_brl == 20.0 and p.plan_id == "tim:59906"

@@ -101,6 +101,29 @@ def test_postpaid_has_no_validity():
     assert all(p.validity_days is None for p in _plans())
 
 
+def test_lite_no_commitment_price_with_loyalty_promo():
+    # #23: Vivo Lite — the render clicks "Sem fidelidade", so `.total-card-price-value` text = the
+    # no-commitment monthly (~R$45) while `data-original-price` keeps the 12-mo loyalty (~R$30). Headline
+    # = no-commitment; loyalty kept as promo with loyalty_months=12. A single-price card (text ==
+    # data-original-price) → no promo.
+    html = ('<div class="unique-card"><div class="unique-card__plan">Easy Lite</div>'
+            '<div class="unique-card__header-benefit">30 GB</div>'
+            '<div class="total-card-price-value" data-original-price="30">45</div>'
+            ' oferta VIV202600011111</div>'
+            '<div class="unique-card"><div class="unique-card__plan">Easy Lite</div>'
+            '<div class="unique-card__header-benefit">20 GB</div>'
+            '<div class="total-card-price-value" data-original-price="35">35</div>'
+            ' oferta VIV202600022222</div>')
+    t = Target(carrier="vivo", render="aem", category="lite", category_label="Vivo Easy/Lite",
+               state="SP", url="u")
+    by_gb = {int(p.data_gb): p for p in parse_vivo_html(html, t)}
+    assert by_gb[30].price_brl == 45.0                     # headline = no-commitment monthly
+    assert by_gb[30].price_promo_brl == 30.0               # loyalty kept as promo
+    assert by_gb[30].loyalty_months == 12
+    assert by_gb[20].price_brl == 35.0 and by_gb[20].price_promo_brl is None   # single-price card
+    assert by_gb[20].loyalty_months is None
+
+
 def test_promo_captured_from_struck_price():
     # a struck-through original price (.unique-card__price-old) → regular vs. effective
     html = ('<div class="unique-card"><div class="unique-card__plan">Vivo Pós Teste</div>'
