@@ -10,6 +10,10 @@ Design (CONTEXT §7):
 """
 from __future__ import annotations
 
+import os
+import re
+import xml.etree.ElementTree as ET
+import zipfile
 from datetime import date, datetime
 from pathlib import Path
 
@@ -464,6 +468,24 @@ def _minifs_day(pc, cc, dc, sc, carrier, category, row, extra_crit=""):
             f'{extra_crit})')
 
 
+def _matrix_value(history: pd.DataFrame, carrier: str, category, kind: str, day_str: str):
+    """The Python value that the matrix cell's MINIFS computes — cheapest R$ for carrier/category on the
+    exact date — used to BAKE a cached value alongside the formula (#21). Same logic as `_minifs_day`:
+    single = min over the category; prepaid30 = min over prepaid with validity_days>=28; digital = min
+    over lite+flex. Returns a rounded float, or None for no match (→ the cell stays blank, matching the
+    formula's IF(=0,"") / IFERROR)."""
+    h = history[(history["carrier"] == carrier) & (history["snapshot_date"].astype(str) == day_str)]
+    if kind == "prepaid30":
+        v = pd.to_numeric(h.get("validity_days"), errors="coerce")
+        sub = h[(h["category"] == "prepaid") & (v >= PREPAID_MIN_VALIDITY_DAYS)]["price_brl"]
+    elif kind == "digital":
+        sub = h[h["category"].isin(["lite", "flex"])]["price_brl"]
+    else:  # single
+        sub = h[h["category"] == category]["price_brl"]
+    sub = pd.to_numeric(sub, errors="coerce").dropna()
+    return round(float(sub.min()), 2) if len(sub) else None
+
+
 def _write_comparison(xl, history: pd.DataFrame):
     """`comparison` = the price-evolution MATRIX, TABLE ONLY (#17), DAILY rows (#19): Date (one row per
     snapshot_date, earliest first) × category-group × carrier (cols), starting at the TOP of the sheet
@@ -471,7 +493,8 @@ def _write_comparison(xl, history: pd.DataFrame):
     the `history` sheet, so the matrix grows one row per day and auto-populates as the daily job adds
     snapshots (self-connected workbook). 0 (no match) → "" so the heatmap ignores it. The 4 charts live
     on the separate `Charts` sheet (#17), so this sheet is a clean, scrollable table — only the 2 header
-    rows + the Date column are frozen. Returns (worksheet, last_data_row) so Charts can reference it."""
+    rows + the Date column are frozen. Returns (worksheet, last_data_row, {coord: value}) — the value map
+    is baked as cached values after save so the file displays in any viewer while keeping formulas (#21)."""
     ws = xl.book.create_sheet("comparison")
     _gridless(ws, TAB_COLORS["comparison"])
     pc, cc, dc, sc = _hist_cols()
@@ -495,6 +518,7 @@ def _write_comparison(xl, history: pd.DataFrame):
         ws.cell(row=HEAD2, column=c).alignment = Alignment(vertical="center", horizontal="center")
 
     r = FIRST
+    comp_values: dict[str, float] = {}                     # {coord: value} to bake as cached values (#21)
     for d_str in evolution_dates(history):                  # one row per snapshot_date, earliest first (#19)
         try:
             day = date.fromisoformat(str(d_str)[:10])
@@ -524,6 +548,9 @@ def _write_comparison(xl, history: pd.DataFrame):
                 cell.number_format = CURRENCY_FMT
                 cell.font = Font(name=FONT)
                 cell.alignment = RIGHT
+                v = _matrix_value(history, carrier, category, kind, d_str)   # bake cached value (#21)
+                if v is not None:
+                    comp_values[f"{get_column_letter(c0 + k)}{r}"] = v
         r += 1
     last = r - 1
 
@@ -548,7 +575,7 @@ def _write_comparison(xl, history: pd.DataFrame):
     ws.column_dimensions["A"].width = 13
     for c in range(2, ncol + 1):
         ws.column_dimensions[get_column_letter(c)].width = 10
-    return ws, last
+    return ws, last, comp_values
 
 
 def _write_charts(xl, comp_ws, first: int, last: int):
@@ -620,6 +647,79 @@ def _current_price_bar(ws, comp_ws, last):
     return chart
 
 
+# ---- cached-value bake (#21) — so the committed workbook DISPLAYS in any viewer, keeping formulas ------
+_SS_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+
+
+def _sheet_xml_targets(zf: zipfile.ZipFile) -> dict:
+    """{sheet display name: 'xl/worksheets/sheetN.xml'} via workbook.xml + its rels (read-only)."""
+    wb = ET.fromstring(zf.read("xl/workbook.xml"))
+    rels = ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"))
+    rid = {r.get("Id"): r.get("Target") for r in rels}
+    out = {}
+    for sh in wb.find(f"{{{_SS_NS}}}sheets"):
+        t = (rid.get(sh.get(f"{{{_REL_NS}}}id")) or "").lstrip("/")
+        if t:
+            out[sh.get("name")] = t if t.startswith("xl/") else "xl/" + t
+    return out
+
+
+def _inject_cached_values(xml: str, coords: dict):
+    """Set ``<v>value</v>`` for each named formula cell, ROBUST to openpyxl's serialization of a formula
+    cell (#21). openpyxl 3.1.x writes ``<f>…</f>`` followed by an EMPTY value placeholder — ``<v/>`` (lxml
+    build) OR ``<v></v>`` (stdlib etree build); older builds write no ``<v>`` at all. We DROP any empty
+    placeholder and write ``<v>value</v>`` after ``</f>`` (so there's exactly one ``<v>``, never a
+    duplicate); a cell that already carries a REAL value is left unchanged (idempotent). A surgical
+    per-cell string edit — no XML re-serialization, so namespaces, drawings (charts), conditional
+    formatting and every other cell stay byte-for-byte intact. Returns (xml, n_injected)."""
+    n = 0
+    for coord, val in coords.items():
+        pat = re.compile(rf'(<c r="{re.escape(coord)}"[^>]*>)(.*?)(</c>)', re.S)
+
+        def repl(m, val=val):
+            nonlocal n
+            inner = m.group(2)
+            if "<f" not in inner or "</f>" not in inner:
+                return m.group(0)                     # not a formula cell
+            if re.search(r"<v>[^<]+</v>", inner):
+                return m.group(0)                     # already has a real cached value (idempotent)
+            inner = re.sub(r"<v\s*/>|<v>\s*</v>", "", inner)      # drop empty <v/> / <v></v> placeholder
+            sval = str(int(val)) if float(val).is_integer() else str(val)   # 150.0 → "150", 58.99 → "58.99"
+            n += 1
+            return m.group(1) + inner.replace("</f>", f"</f><v>{sval}</v>", 1) + m.group(3)
+
+        xml = pat.sub(repl, xml, count=1)
+    return xml, n
+
+
+def _bake_cached_values(path, value_map: dict) -> int:
+    """Bake cached values into the named formula cells so the workbook DISPLAYS its values in ANY viewer
+    (GitHub preview, Google Sheets, mobile, Excel Protected View) while KEEPING the live formulas.
+    openpyxl writes ``<f>`` without ``<v>``, so those viewers (which don't recalc) show blank — this
+    injects ``<v>`` alongside ``<f>``. Only the named cells are touched (charts / CF / formatting are
+    left intact). Blank cells (no offer) are not in the map, so they correctly stay blank. Returns the
+    number of cells baked. (#21)"""
+    path = Path(path)
+    with zipfile.ZipFile(path) as zf:
+        targets = _sheet_xml_targets(zf)
+        blobs = {n: zf.read(n) for n in zf.namelist()}
+    baked = 0
+    for sheet, coords in value_map.items():
+        tgt = targets.get(sheet)
+        if not tgt or tgt not in blobs or not coords:
+            continue
+        new_xml, n = _inject_cached_values(blobs[tgt].decode("utf-8"), coords)
+        blobs[tgt] = new_xml.encode("utf-8")
+        baked += n                                    # count ACTUAL injections (0-bake regressions detectable)
+    tmp = path.with_name(path.name + ".bake.tmp")
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, data in blobs.items():
+            zf.writestr(name, data)
+    os.replace(tmp, path)
+    return baked
+
+
 def write_workbook(plans, path: str | Path, run_ts: datetime) -> dict:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -656,9 +756,10 @@ def write_workbook(plans, path: str | Path, run_ts: datetime) -> dict:
             latest_ws.conditional_formatting.add(                                    # promo accent
                 f"{L}2:{L}{last}", FormulaRule(formula=[f"NOT(ISBLANK({L}2))"], fill=PROMO_FILL))
         _format_sheet(xl.sheets["changes"], (7, 8, 9), tab_color=TAB_COLORS["changes"])
-        _write_summary(xl, run_ts, latest_date, len(latest), history["snapshot_date"].nunique())
-        comp_ws, comp_last = _write_comparison(xl, history)   # table-only daily matrix (main view)
-        _write_charts(xl, comp_ws, EVO_FIRST, comp_last)      # 4 line charts on their own sheet (#17)
+        summ_values = _write_summary(xl, run_ts, latest_date, len(latest),
+                                     history["snapshot_date"].nunique(), latest)
+        comp_ws, comp_last, comp_values = _write_comparison(xl, history)   # table-only daily matrix
+        _write_charts(xl, comp_ws, EVO_FIRST, comp_last)      # 4 line charts + bar chart on `Charts` (#17/#20)
         _write_ranking(xl, latest)           # validated cross-section (rank-aligned, today)
         _write_operator_sheets(xl, latest)   # one tab per carrier (by-operator catalog view)
         # Open on the clean `comparison` table, not on `history`: set it active + the only selected tab.
@@ -666,6 +767,19 @@ def write_workbook(plans, path: str | Path, run_ts: datetime) -> dict:
         xl.book.active = comp_idx
         for i, s in enumerate(xl.book.worksheets):
             s.sheet_view.tabSelected = (i == comp_idx)
+
+    # openpyxl writes formulas WITHOUT cached values, so non-recalc viewers (GitHub preview, Google Sheets,
+    # mobile, Excel Protected View) show blank. Bake the computed values into the formula cells — keeping
+    # the live formulas — so the committed workbook displays everywhere. (#21, CONTEXT §5/§7)
+    value_map = {"comparison": comp_values, "summary": summ_values}
+    baked = _bake_cached_values(path, value_map)
+    expected = sum(len(v) for v in value_map.values())
+    # Fail LOUDLY on a 0/partial bake (e.g. a future openpyxl serialization change defeating the injector)
+    # rather than silently committing a workbook that displays blank in non-recalc viewers. (#21)
+    if expected and baked != expected:
+        raise RuntimeError(
+            f"cached-value bake wrote {baked}/{expected} cells — the workbook would display blank in "
+            f"non-recalc viewers (openpyxl serialization changed?). Aborting to avoid shipping it.")
 
     return {
         "path": str(path),
@@ -676,7 +790,7 @@ def write_workbook(plans, path: str | Path, run_ts: datetime) -> dict:
     }
 
 
-def _write_summary(xl, run_ts, latest_date, n_latest, n_snapshots):
+def _write_summary(xl, run_ts, latest_date, n_latest, n_snapshots, latest):
     wb = xl.book
     ws = wb.create_sheet("summary")
     _gridless(ws, TAB_COLORS["summary"])
@@ -703,6 +817,7 @@ def _write_summary(xl, run_ts, latest_date, n_latest, n_snapshots):
     for j, h in enumerate(headers, start=1):
         ws.cell(row=head_row, column=j, value=h)
     _house_header(ws, head_row, len(headers))
+    summ_values: dict[str, float] = {}                     # {coord: value} to bake as cached values (#21)
     for idx, carrier in enumerate(["vivo", "claro", "tim"], start=head_row + 1):
         a = f"$A${idx}"
         ws.cell(row=idx, column=1, value=carrier).font = Font(name=FONT)
@@ -712,5 +827,13 @@ def _write_summary(xl, run_ts, latest_date, n_latest, n_snapshots):
         ws.cell(row=idx, column=5, value=f'=IFERROR(_xlfn.MAXIFS({rng_p},{rng_c},{a}),"-")').font = Font(name=FONT)
         for col in (3, 4, 5):
             ws.cell(row=idx, column=col).number_format = CURRENCY_FMT
+        # bake cached KPI values (same aggregation the formulas do, over the latest snapshot) (#21)
+        prices = pd.to_numeric(latest[latest["carrier"] == carrier]["price_brl"], errors="coerce").dropna()
+        summ_values[f"B{idx}"] = int((latest["carrier"] == carrier).sum())     # COUNTIF
+        if len(prices):
+            summ_values[f"C{idx}"] = round(float(prices.min()), 2)             # MINIFS
+            summ_values[f"D{idx}"] = round(float(prices.mean()), 2)            # AVERAGEIFS
+            summ_values[f"E{idx}"] = round(float(prices.max()), 2)             # MAXIFS
     for col, w in {1: 22, 2: 12, 3: 14, 4: 14, 5: 14}.items():
         ws.column_dimensions[get_column_letter(col)].width = w
+    return summ_values

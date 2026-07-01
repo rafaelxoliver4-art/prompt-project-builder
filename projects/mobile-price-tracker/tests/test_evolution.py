@@ -14,6 +14,7 @@ from datetime import date, datetime
 
 import openpyxl
 import pandas as pd
+import pytest
 
 from mobile_tracker.excel_writer import write_workbook, evolution_dates, evolution_months
 from mobile_tracker.models import Plan
@@ -223,6 +224,60 @@ def test_current_price_bar_chart_on_charts(tmp_path):
     assert sum("lineChart" in x for x in cx) == 4               # plus the 4 line charts (5 total)
     bar = next(x for x in cx if "barChart" in x)
     assert "'Charts'!" in bar                                   # bar reads the on-sheet helper table
+
+
+def test_inject_cached_values_handles_all_openpyxl_v_shapes():
+    """#21 regression: the injector must handle every way openpyxl serializes a formula cell — empty
+    <v/> (3.1.x lxml), empty <v></v> (3.1.x stdlib), and no <v> (older) — producing exactly ONE <v> with
+    the value, and be idempotent for a real value. (A guard that only skipped '<v>' silently baked 0 on
+    openpyxl 3.1.5.)"""
+    from mobile_tracker.excel_writer import _inject_cached_values
+    # self-closing empty placeholder (openpyxl 3.1.x + lxml)
+    out, n = _inject_cached_values('<s><c r="B3"><f>MINIFS(1)</f><v/></c></s>', {"B3": 58.99})
+    assert n == 1 and "<v>58.99</v>" in out and "<v/>" not in out and out.count("<v>") == 1
+    # empty <v></v> placeholder (openpyxl 3.1.x + stdlib etree — the reviewer's env)
+    out, n = _inject_cached_values('<s><c r="B3"><f>MINIFS(1)</f><v></v></c></s>', {"B3": 150.0})
+    assert n == 1 and "<v>150</v>" in out and out.count("<v>") == 1        # 150.0 → "150"
+    # no <v> at all (older openpyxl)
+    out, n = _inject_cached_values('<s><c r="B3"><f>MINIFS(1)</f></c></s>', {"B3": 44.9})
+    assert n == 1 and "<v>44.9</v>" in out
+    # idempotent: a real cached value is left unchanged, not doubled
+    out, n = _inject_cached_values('<s><c r="B3"><f>F</f><v>99</v></c></s>', {"B3": 1.0})
+    assert n == 0 and "<v>99</v>" in out and "<v>1</v>" not in out
+    # non-formula cell is skipped; and "B3" must not match "B30"
+    out, n = _inject_cached_values('<s><c r="B30"><f>F</f><v/></c></s>', {"B3": 1.0})
+    assert n == 0 and "<v>1</v>" not in out
+
+
+def test_bake_guard_raises_on_incomplete_bake(tmp_path, monkeypatch):
+    """#21: if the injector ever fails to bake all cells (e.g. a future openpyxl serialization change
+    defeats it), write_workbook must RAISE (fail loud) rather than silently ship a blank workbook."""
+    import mobile_tracker.excel_writer as ew
+    monkeypatch.setattr(ew, "_inject_cached_values", lambda xml, coords: (xml, 0))   # simulate 0-bake
+    with pytest.raises(RuntimeError, match="bake"):
+        write_workbook([_mk("tim", "postpaid", "TB", 120.0, "2026-06-22")],
+                       tmp_path / "m.xlsx", datetime(2026, 6, 22, 18))
+
+
+def test_formula_cells_have_cached_values_baked(tmp_path):
+    """#21: openpyxl writes formulas WITHOUT cached values → blank in non-recalc viewers. The bake injects
+    <v> alongside <f>: data_only=True now shows values AND data_only=False still shows the live formulas."""
+    out = _multi_day(tmp_path / "m.xlsx")                 # 3 dates; day 1 (22-Jun) TIM postpaid = 122.0
+    fwb = openpyxl.load_workbook(out, data_only=False)    # formulas
+    vwb = openpyxl.load_workbook(out, data_only=True)     # cached values
+    comp_f, comp_v = fwb["comparison"], vwb["comparison"]
+    post_tim_f = comp_f.cell(FIRST, 5).value             # Post group, TIM, first day
+    assert isinstance(post_tim_f, str) and "MINIFS" in post_tim_f          # formula still present
+    assert comp_v.cell(FIRST, 5).value is not None                        # cached value baked
+    assert float(comp_v.cell(FIRST, 5).value) == 122.0                    # ...and correct
+    # every matrix cell that has a formula AND a real (non-blank) value should now carry a cached value
+    baked = sum(1 for r in range(FIRST, FIRST + 3) for c in range(2, 14)
+                if isinstance(comp_f.cell(r, c).value, str) and comp_v.cell(r, c).value is not None)
+    assert baked >= 9                                     # postpaid/lite/flex populated across 3 days
+    # summary KPI: formula + cached value both present (vivo min over latest = 30.0)
+    summ_f, summ_v = fwb["summary"], vwb["summary"]
+    assert isinstance(summ_f["C9"].value, str) and "MINIFS" in summ_f["C9"].value
+    assert float(summ_v["C9"].value) == 30.0
 
 
 def test_charts_sheet_exists_and_comparison_is_table_only(tmp_path):
