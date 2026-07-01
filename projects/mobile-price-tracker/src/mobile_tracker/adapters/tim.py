@@ -40,6 +40,27 @@ _GB = re.compile(r"(\d+)\s*GB", re.I)
 # marketing line ("recarga de R$30 válidos por 30 dias") appears in EVERY oferta, so #18's MAX-"N dias"
 # wrongly inflated all to 30. We match THIS oferta's recarga amount. Audit #22: R$20→17, R$25→22, R$30→30.
 _TIM_TIER = re.compile(r"R\$\s*(\d+)[^\d]{0,45}?(?:por|v[aá]lid[oa]s?\s+por)\s+(\d+)\s*dias", re.I)
+# Postpaid billing type (#24): the oferta's `field_preco_principal_7_1_3` PRICE HEADLINE reads
+# "R$ <price>/mês no cartão" (recurring CREDIT CARD — TIM's cheaper "Express" line, low adoption) OR
+# "R$ <price>/mês na fatura" (paid on the INVOICE/bill). We anchor to the "/mês <phrase>" clause so stray
+# marketing/benefits text elsewhere in the (full-HTML) blob — e.g. a "pague no cartão" promo or a "12x no
+# cartão" assinatura line — can NOT flip the classification (a bill plan must never be misread as
+# credit_card, which would wrongly drop it from the entry-level pick). Verified live (SP, 2026-07): all 7
+# plans have exactly one "/mês <phrase>" in the headline. The postpaid matrix pick excludes "credit_card"
+# (JPMorgan rule; the bill-payment plan wins). (#24; anchored after adversarial review)
+_PAY_HEADLINE = re.compile(r"/\s*m[eê]s\s+(no\s+cart[aã]o|na\s+fatura)", re.I)
+
+
+def _payment_method(oferta: dict) -> str | None:
+    """TIM postpaid billing type from the `field_preco_principal_7_1_3` price headline: "/mês no cartão"
+    → "credit_card" (requires a recurring credit card — the cheaper "Express" line), "/mês na fatura" →
+    "bill". Anchored to the "/mês" clause so only the price line — not stray card/fatura words in the
+    benefits HTML — decides. None if the headline is absent/ambiguous (→ the plan is NOT excluded from the
+    entry-level pick, the safe default). (#24)"""
+    m = _PAY_HEADLINE.search(_field(oferta, "field_preco_principal_7_1_3") or "")
+    if not m:
+        return None
+    return "credit_card" if "cart" in m.group(1).lower() else "bill"
 
 
 def _prepaid_validity(oferta_text: str, price: float | None) -> int | None:
@@ -125,6 +146,11 @@ def parse_tim_html(html: str, target: Target, raw_ref: str | None = None) -> lis
         validity_days = None
         if target.category == "prepaid":
             validity_days = _prepaid_validity(json.dumps(o, ensure_ascii=False), price)
+        # POSTPAID only (#24): tag the billing type ("credit_card" vs "bill"). Gated on category so
+        # control/prepaid parsing is untouched. The matrix Post pick uses it to exclude credit-card-only.
+        payment_method = None
+        if target.category == "postpaid":
+            payment_method = _payment_method(o)
         # native Drupal node id (e.g. "155891"); fall back to the SKU field, then a name slug
         nid = _field(o, "nid")
         if nid and str(nid).strip():
@@ -144,7 +170,7 @@ def parse_tim_html(html: str, target: Target, raw_ref: str | None = None) -> lis
         plans.append(BaseAdapter.make_plan(
             target, plan_name=name, plan_id=plan_id, price_brl=price_brl,
             price_promo_brl=price_promo, price_note=note, data_gb=data_gb,
-            validity_days=validity_days, raw_ref=raw_ref))
+            validity_days=validity_days, payment_method=payment_method, raw_ref=raw_ref))
     return plans
 
 

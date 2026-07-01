@@ -472,8 +472,10 @@ def _matrix_value(history: pd.DataFrame, carrier: str, category, kind: str, day_
     """The Python value that the matrix cell's MINIFS computes — cheapest R$ for carrier/category on the
     exact date — used to BAKE a cached value alongside the formula (#21). Same logic as `_minifs_day`:
     single = min over the category; prepaid30 = min over prepaid with validity_days>=28; digital = min
-    over lite+flex. Returns a rounded float, or None for no match (→ the cell stays blank, matching the
-    formula's IF(=0,"") / IFERROR)."""
+    over lite+flex. POSTPAID additionally EXCLUDES credit-card-only plans (payment_method=="credit_card"),
+    keeping blanks — mirrors the formula's "<>credit_card" criterion, which Excel evaluates INCLUDING
+    blank cells (verified, #24). Returns a rounded float, or None for no match (→ the cell stays blank,
+    matching the formula's IF(=0,"") / IFERROR)."""
     h = history[(history["carrier"] == carrier) & (history["snapshot_date"].astype(str) == day_str)]
     if kind == "prepaid30":
         v = pd.to_numeric(h.get("validity_days"), errors="coerce")
@@ -481,7 +483,11 @@ def _matrix_value(history: pd.DataFrame, carrier: str, category, kind: str, day_
     elif kind == "digital":
         sub = h[h["category"].isin(["lite", "flex"])]["price_brl"]
     else:  # single
-        sub = h[h["category"] == category]["price_brl"]
+        hcat = h[h["category"] == category]
+        if category == "postpaid" and "payment_method" in hcat.columns:   # exclude credit-card-only (#24)
+            pm = hcat["payment_method"].astype("string").fillna("").str.strip().str.lower()
+            hcat = hcat[pm != "credit_card"]                              # blanks kept (Excel <> incl blanks)
+        sub = hcat["price_brl"]
     sub = pd.to_numeric(sub, errors="coerce").dropna()
     return round(float(sub.min()), 2) if len(sub) else None
 
@@ -499,6 +505,7 @@ def _write_comparison(xl, history: pd.DataFrame):
     _gridless(ws, TAB_COLORS["comparison"])
     pc, cc, dc, sc = _hist_cols()
     vc = get_column_letter(COLUMNS.index("validity_days") + 1)   # history validity_days column (#18)
+    pmc = get_column_letter(COLUMNS.index("payment_method") + 1)  # history payment_method column (#24)
     ncol = 1 + 3 * len(EVOLUTION_GROUPS)
 
     HEAD1, HEAD2, FIRST = EVO_HEAD1, EVO_HEAD2, EVO_FIRST   # table at the top: 1 / 2 / 3+
@@ -531,7 +538,13 @@ def _write_comparison(xl, history: pd.DataFrame):
             c0 = 2 + g * 3
             for k, carrier in enumerate(EVOLUTION_CARRIERS):
                 if kind == "single":
-                    m = _minifs_day(pc, cc, dc, sc, carrier, category, r)
+                    # POSTPAID entry-level pick EXCLUDES credit-card-only plans (JPMorgan rule, #24): TIM's
+                    # cheapest "Express" plan is R$119,99 no cartão (recurring credit card, low adoption), so
+                    # the Post column uses the cheapest BILL-payment plan (~R$129,99). Blank payment_method is
+                    # INCLUDED by Excel's "<>credit_card" (verified via COM recalc), so carriers without a
+                    # tagged credit-card plan (Vivo/Claro) are unaffected, and pre-#24 history self-heals.
+                    crit = f',history!${pmc}:${pmc},"<>credit_card"' if category == "postpaid" else ""
+                    m = _minifs_day(pc, cc, dc, sc, carrier, category, r, extra_crit=crit)
                     formula = f'=IFERROR(IF({m}=0,"",{m}),"")'
                 elif kind == "prepaid30":   # cheapest 30-day prepaid plan (validity_days >= 28) — #18
                     crit = f',history!${vc}:${vc},">={PREPAID_MIN_VALIDITY_DAYS}"'

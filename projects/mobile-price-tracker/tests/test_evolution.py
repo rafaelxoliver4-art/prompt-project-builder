@@ -138,6 +138,79 @@ def test_pre_column_filters_30day_validity(tmp_path):
     assert f'history!${vcol}:${vcol},">=28"' in pre_claro    # the 30-day validity filter
 
 
+def _mk_post(carrier, name, price, date_str, payment_method=None):
+    p = _mk(carrier, "postpaid", name, price, date_str)
+    p.payment_method = payment_method
+    return p
+
+
+def test_post_column_excludes_credit_card_only(tmp_path):
+    """#24 (JPMorgan rule): the matrix Post pick excludes credit-card-only plans. TIM's cheaper
+    "no cartão" plan (R$119,99) is skipped, so Post shows the cheapest BILL-payment plan (R$129,99).
+    ALL plans stay in history. A carrier with no credit-card tag (blank payment_method) is unaffected."""
+    from openpyxl.utils import get_column_letter
+    from mobile_tracker.models import COLUMNS
+    out = tmp_path / "m.xlsx"
+    write_workbook([
+        _mk_post("tim", "TIM Black A Express 67GB", 119.99, "2026-07-01", "credit_card"),
+        _mk_post("tim", "TIM Black 70GB", 129.99, "2026-07-01", "bill"),
+        _mk_post("vivo", "Vivo Pós", 150.0, "2026-07-01", None),      # untagged → unaffected
+    ], out, datetime(2026, 7, 1, 18))
+
+    # nothing dropped from history — both TIM postpaid plans are retained
+    hist = pd.read_excel(out, sheet_name="history")
+    assert "payment_method" in hist.columns
+    tim_post = hist[(hist["carrier"] == "tim") & (hist["category"] == "postpaid")]
+    assert {round(float(x), 2) for x in tim_post["price_brl"]} == {119.99, 129.99}
+
+    fwb = openpyxl.load_workbook(out, data_only=False)
+    vwb = openpyxl.load_workbook(out, data_only=True)
+    comp_f, comp_v = fwb["comparison"], vwb["comparison"]
+    pmc = get_column_letter(COLUMNS.index("payment_method") + 1)
+    post_tim_f = comp_f.cell(FIRST, 5).value                          # Post group cols 5/6/7 = TIM/Vivo/Claro
+    assert f'history!${pmc}:${pmc},"<>credit_card"' in post_tim_f     # the exclusion criterion
+    assert float(comp_v.cell(FIRST, 5).value) == 129.99              # baked = BILL plan, NOT 119.99
+    assert float(comp_v.cell(FIRST, 6).value) == 150.0              # Vivo (blank pm) unaffected
+
+
+def test_only_postpaid_column_gets_payment_criterion(tmp_path):
+    """#24: the credit-card exclusion applies ONLY to the Post column — Control (also a 'single' group)
+    carries no payment_method criterion."""
+    from openpyxl.utils import get_column_letter
+    from mobile_tracker.models import COLUMNS
+    out = tmp_path / "m.xlsx"
+    write_workbook([
+        _mk_post("tim", "TIM Black 70GB", 129.99, "2026-07-01", "bill"),
+        _mk("tim", "control", "TIM Controle", 58.99, "2026-07-01"),
+    ], out, datetime(2026, 7, 1, 18))
+    comp = openpyxl.load_workbook(out, data_only=False)["comparison"]
+    pmc = get_column_letter(COLUMNS.index("payment_method") + 1)
+    assert f'${pmc}:${pmc},"<>credit_card"' in comp.cell(FIRST, 5).value    # Post TIM has it
+    assert '"<>credit_card"' not in comp.cell(FIRST, 2).value               # Control TIM does not
+
+
+def test_matrix_value_postpaid_excludes_credit_card_keeps_blanks():
+    """#24 unit: _matrix_value drops credit_card for postpaid but KEEPS blanks — mirroring Excel's
+    "<>credit_card" (which includes blank cells, verified via COM recalc) so bake == formula."""
+    from mobile_tracker.excel_writer import _matrix_value
+    tagged = pd.DataFrame([
+        {"carrier": "tim", "category": "postpaid", "snapshot_date": "2026-07-01",
+         "price_brl": 119.99, "payment_method": "credit_card"},
+        {"carrier": "tim", "category": "postpaid", "snapshot_date": "2026-07-01",
+         "price_brl": 129.99, "payment_method": "bill"},
+    ])
+    assert _matrix_value(tagged, "tim", "postpaid", "single", "2026-07-01") == 129.99  # credit excluded
+
+    # historical rows (pre-#24): blank payment_method → INCLUDED → keeps the old cheapest (self-heal)
+    blank = pd.DataFrame([
+        {"carrier": "tim", "category": "postpaid", "snapshot_date": "2026-06-22",
+         "price_brl": 119.99, "payment_method": None},
+        {"carrier": "tim", "category": "postpaid", "snapshot_date": "2026-06-22",
+         "price_brl": 129.99, "payment_method": None},
+    ])
+    assert _matrix_value(blank, "tim", "postpaid", "single", "2026-06-22") == 119.99  # blanks kept
+
+
 def test_heatmap_colorscale_present(tmp_path):
     wb = openpyxl.load_workbook(_multi_day(tmp_path / "m.xlsx"))
     assert len(list(wb["comparison"].conditional_formatting)) >= 1

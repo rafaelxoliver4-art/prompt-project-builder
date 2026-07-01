@@ -22,6 +22,7 @@ COLUMNS: list[str] = [
     "price_brl",
     "price_promo_brl",
     "price_note",
+    "payment_method",
     "data_gb",
     "data_note",
     "validity_days",
@@ -51,6 +52,11 @@ class Plan:
     price_brl: Optional[float] = None
     price_promo_brl: Optional[float] = None
     price_note: Optional[str] = None
+    # Billing type — populated for POSTPAID where the carrier prices a plan by payment method.
+    # "credit_card" = requires a recurring credit card (TIM's cheaper "Express"/"no cartão" line, low
+    # adoption); "bill" = paid on the invoice ("na fatura"); None = not distinguished. The postpaid
+    # entry-level matrix pick EXCLUDES "credit_card" (JPMorgan rule — the bill-payment plan). (#24, §3)
+    payment_method: Optional[str] = None
     data_gb: Optional[float] = None
     data_note: Optional[str] = None
     # Plan validity period in days — populated for PREPAID (recarga lasts N days); the Pre matrix

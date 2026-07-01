@@ -92,3 +92,68 @@ def test_prepaid_validity_days_is_per_oferta_not_max():
     assert p.category == "prepaid"
     assert p.validity_days == 17          # its OWN 17d — NOT the shared 30d (the #18 bug)
     assert p.data_gb == 6.0 and p.price_brl == 20.0 and p.plan_id == "tim:59906"
+
+
+def _postpaid_html(*ofertas) -> str:
+    """Wrap oferta dicts in the drupal-settings-json <script> the parser reads."""
+    import json
+    settings = {"ofertas": list(ofertas)}
+    return ('<script data-drupal-selector="drupal-settings-json" type="application/json">'
+            + json.dumps(settings, ensure_ascii=False) + "</script>")
+
+
+def _oferta(nid, title, price, headline):
+    return {"nid": [{"value": nid}], "title": [{"value": title}],
+            "field_preco_card_oferta": [{"value": price}],
+            "field_preco_principal_7_1_3": [{"value": headline}]}
+
+
+def test_postpaid_payment_method_credit_card_vs_bill():
+    # #24: TIM postpaid billing type = field_preco_principal_7_1_3 headline — "no cartão" (recurring
+    # credit card, the cheaper "Express" line) vs "na fatura" (bill/invoice). The two phrases are mutually
+    # exclusive in that field (verified live SP 2026-07), so classification is reliable.
+    html = _postpaid_html(
+        _oferta("55121", "1 Card - TIM Black A Express - 67GB - [On Air]", "119,99",
+                '<p style="font-size: 22px;">R$ 119,99/mês no cartão</p>\r\n<p>Incluso:</p>'),
+        _oferta("54206", "1 Card - TIM Black - 70GB - [PROD]", "129,99",
+                '<p style="font-size: 22px;">R$ 129,99/mês na fatura</p>\r\n<p>Liberdade para escolher '
+                'uma assinatura:</p>'),
+    )
+    t = Target(carrier="tim", render="html", category="postpaid", category_label="Pós",
+               state="SP", url="https://www.tim.com.br/sp/para-voce/planos/pos-pago/tim-black")
+    plans = {p.plan_id: p for p in parse_tim_html(html, t, raw_ref="fx")}
+    assert plans["tim:55121"].payment_method == "credit_card"   # cheaper "no cartão" plan (excluded later)
+    assert plans["tim:55121"].price_brl == 119.99
+    assert plans["tim:54206"].payment_method == "bill"          # "na fatura" — the entry-level pick
+    assert plans["tim:54206"].price_brl == 129.99
+
+
+def test_payment_method_only_tagged_for_postpaid():
+    # #24: gated on category — the SAME field on a control/prepaid target is NOT tagged.
+    html = _postpaid_html(
+        _oferta("999", "1 Card - TIM Controle Plus - 45GB - [PROD]", "64,99",
+                '<p>R$ 64,99/mês no cartão</p>'))
+    tc = Target(carrier="tim", render="html", category="control", category_label="Controle",
+                state="SP", url="https://www.tim.com.br/sp/para-voce/planos/controle")
+    assert all(p.payment_method is None for p in parse_tim_html(html, tc, raw_ref="fx"))
+
+
+def test_payment_method_helper_none_when_absent_or_ambiguous():
+    # #24: no headline field, or one without either phrase → None (plan is NOT excluded).
+    from mobile_tracker.adapters.tim import _payment_method
+    assert _payment_method({}) is None
+    assert _payment_method({"field_preco_principal_7_1_3": [{"value": "<p>R$ 100/mês</p>"}]}) is None
+
+
+def test_payment_method_anchored_to_price_headline_not_stray_marketing():
+    # #24 (hardening after adversarial review): the classifier is anchored to the "/mês <phrase>" price
+    # line, so stray "no cartão" marketing/benefits text can NEVER flip a BILL plan to credit_card (which
+    # would wrongly drop it from the entry-level pick). A bill headline + a "pague no cartão" promo → bill.
+    from mobile_tracker.adapters.tim import _payment_method
+    bill_with_card_promo = {"field_preco_principal_7_1_3": [{"value":
+        '<p style="font-size: 22px;">R$ 129,99/mês na fatura</p>\r\n'
+        '<p>Pague no cartão e ganhe cashback</p>\r\n<p>ou 12x no cartão</p>'}]}
+    assert _payment_method(bill_with_card_promo) == "bill"        # headline wins, promo ignored
+    card_headline = {"field_preco_principal_7_1_3": [{"value":
+        '<p style="font-size: 22px;">R$ 119,99/mês no cartão</p>\r\n<p>Pague também na fatura</p>'}]}
+    assert _payment_method(card_headline) == "credit_card"        # symmetric: card headline wins
