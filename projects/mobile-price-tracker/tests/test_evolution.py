@@ -211,6 +211,45 @@ def test_matrix_value_postpaid_excludes_credit_card_keeps_blanks():
     assert _matrix_value(blank, "tim", "postpaid", "single", "2026-06-22") == 119.99  # blanks kept
 
 
+def test_digital_lite_requires_sem_fidelidade(tmp_path):
+    """#26: the Digital Vivo/lite pick uses the cheapest plan that OFFERS a 'Sem fidelidade' choice
+    (loyalty_months set — a monthly/annual toggle card). A monthly-ONLY tier (20GB 'Plano mensal' R$35,
+    no loyalty) is EXCLUDED, so the entry-level is the cheapest Sem-fidelidade plan (R$45) — not R$35.
+    Flex (Claro) has no toggle → unrestricted. All lite plans stay in history."""
+    from openpyxl.utils import get_column_letter
+    from mobile_tracker.models import COLUMNS
+    out = tmp_path / "m.xlsx"
+    el20 = _mk("vivo", "lite", "Easy Lite 20", 35.0, "2026-07-01")        # monthly-only, NO loyalty
+    el30 = _mk("vivo", "lite", "Easy Lite 30", 45.0, "2026-07-01"); el30.loyalty_months = 12
+    el40 = _mk("vivo", "lite", "Easy Lite 40", 55.0, "2026-07-01"); el40.loyalty_months = 12
+    flex = _mk("claro", "flex", "Flex 15", 44.9, "2026-07-01")            # no toggle → unrestricted
+    write_workbook([el20, el30, el40, flex], out, datetime(2026, 7, 1, 18))
+    fwb = openpyxl.load_workbook(out, data_only=False)
+    vwb = openpyxl.load_workbook(out, data_only=True)
+    lc = get_column_letter(COLUMNS.index("loyalty_months") + 1)
+    dig_vivo_f = fwb["comparison"].cell(FIRST, 12).value                  # Digital group K/L/M = TIM/Vivo/Claro
+    assert f'history!${lc}:${lc},">0"' in dig_vivo_f                      # lite gated on loyalty_months
+    assert float(vwb["comparison"].cell(FIRST, 12).value) == 45.0        # cheapest Sem-fidelidade, NOT the R$35
+    assert float(vwb["comparison"].cell(FIRST, 13).value) == 44.9        # Claro flex unchanged
+    hist = pd.read_excel(out, sheet_name="history")
+    lite_prices = {round(float(x), 2) for x in hist[(hist.carrier == "vivo") & (hist.category == "lite")]["price_brl"]}
+    assert {35.0, 45.0, 55.0}.issubset(lite_prices)                       # all 3 kept in history (incl. the 20GB)
+
+
+def test_matrix_value_digital_lite_loyalty_gated():
+    """#26 unit: _matrix_value digital keeps only lite plans with loyalty_months>0; blanks (pre-#23 lite
+    with no loyalty) self-heal to None; flex is unrestricted."""
+    from mobile_tracker.excel_writer import _matrix_value
+    df = pd.DataFrame([
+        {"carrier": "vivo", "category": "lite", "snapshot_date": "2026-07-01", "price_brl": 35.0, "loyalty_months": None},
+        {"carrier": "vivo", "category": "lite", "snapshot_date": "2026-07-01", "price_brl": 45.0, "loyalty_months": 12},
+    ])
+    assert _matrix_value(df, "vivo", None, "digital", "2026-07-01") == 45.0     # R$35 (no loyalty) excluded
+    old = pd.DataFrame([
+        {"carrier": "vivo", "category": "lite", "snapshot_date": "2026-06-22", "price_brl": 30.0, "loyalty_months": None}])
+    assert _matrix_value(old, "vivo", None, "digital", "2026-06-22") is None    # pre-#23 → blank (self-heal)
+
+
 def test_heatmap_colorscale_present(tmp_path):
     wb = openpyxl.load_workbook(_multi_day(tmp_path / "m.xlsx"))
     assert len(list(wb["comparison"].conditional_formatting)) >= 1

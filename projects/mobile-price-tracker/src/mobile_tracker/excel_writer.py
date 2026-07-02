@@ -500,7 +500,15 @@ def _matrix_value(history: pd.DataFrame, carrier: str, category, kind: str, day_
         v = pd.to_numeric(h.get("validity_days"), errors="coerce")
         sub = h[(h["category"] == "prepaid") & (v >= PREPAID_MIN_VALIDITY_DAYS)]["price_brl"]
     elif kind == "digital":
-        sub = h[h["category"].isin(["lite", "flex"])]["price_brl"]
+        # Vivo Lite entry = the cheapest plan that OFFERS a "Sem fidelidade" choice (a monthly/annual
+        # toggle card → parser sets loyalty_months). Excludes monthly-ONLY tiers like the 20GB "Plano
+        # mensal" R$35 (no loyalty option) so the entry-level is the cheapest Sem-fidelidade plan (R$45),
+        # per the Bridge (#26). Flex (Claro) has no loyalty toggle → unrestricted. Pre-#23 lite rows have
+        # no loyalty_months → excluded → those dates self-heal to blank (like #18/#23).
+        litep = h[h["category"] == "lite"]
+        if "loyalty_months" in litep.columns:
+            litep = litep[pd.to_numeric(litep["loyalty_months"], errors="coerce") > 0]
+        sub = pd.concat([litep["price_brl"], h[h["category"] == "flex"]["price_brl"]])
     else:  # single
         hcat = h[h["category"] == category]
         if category == "postpaid" and "payment_method" in hcat.columns:   # exclude credit-card-only (#24)
@@ -525,6 +533,7 @@ def _write_comparison(xl, history: pd.DataFrame):
     pc, cc, dc, sc = _hist_cols()
     vc = get_column_letter(COLUMNS.index("validity_days") + 1)   # history validity_days column (#18)
     pmc = get_column_letter(COLUMNS.index("payment_method") + 1)  # history payment_method column (#24)
+    lc = get_column_letter(COLUMNS.index("loyalty_months") + 1)   # history loyalty_months column (#26)
     ncol = 1 + 3 * len(EVOLUTION_GROUPS)
 
     HEAD1, HEAD2, FIRST = EVO_HEAD1, EVO_HEAD2, EVO_FIRST   # table at the top: 1 / 2 / 3+
@@ -573,8 +582,13 @@ def _write_comparison(xl, history: pd.DataFrame):
                     # reciprocal-max picks the smaller positive price: a day's MINIFS returns 0 on
                     # no-match (and no real plan is priced 0), so 1/0 → IFERROR → 0, and MAX keeps the
                     # larger reciprocal = the smaller price; both absent → MAX(0,0)=0 → 1/0 → "".
-                    lite = _minifs_day(pc, cc, dc, sc, carrier, "lite", r)
-                    flex = _minifs_day(pc, cc, dc, sc, carrier, "flex", r)
+                    # LITE requires loyalty_months > 0 (#26): only plans that OFFER a "Sem fidelidade" choice
+                    # (a monthly/annual toggle card) count, so the monthly-ONLY 20GB "Plano mensal" R$35 is
+                    # excluded and the entry-level is the cheapest Sem-fidelidade plan (Vivo → R$45). Excel
+                    # numeric ">0" excludes blanks, so pre-#23 lite rows (no loyalty) self-heal to blank.
+                    lite = _minifs_day(pc, cc, dc, sc, carrier, "lite", r,
+                                       extra_crit=f',history!${lc}:${lc},">0"')
+                    flex = _minifs_day(pc, cc, dc, sc, carrier, "flex", r)   # Flex has no toggle → unrestricted
                     formula = f'=IFERROR(1/MAX(IFERROR(1/{lite},0),IFERROR(1/{flex},0)),"")'
                 cell = ws.cell(row=r, column=c0 + k, value=formula)
                 cell.number_format = CURRENCY_FMT
