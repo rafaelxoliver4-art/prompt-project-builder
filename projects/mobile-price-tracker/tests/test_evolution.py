@@ -299,6 +299,66 @@ def test_current_price_bar_chart_on_charts(tmp_path):
     assert "'Charts'!" in bar                                   # bar reads the on-sheet helper table
 
 
+def _chart_xmls(path):
+    with zipfile.ZipFile(path) as z:
+        return [z.read(n).decode("utf-8") for n in z.namelist()
+                if re.match(r"xl/charts/chart\d+\.xml$", n)]
+
+
+def _axis_block(xml, axis):
+    m = re.search(rf"<(?:c:)?{axis}>(.*?)</(?:c:)?{axis}>", xml, re.S)
+    return m.group(1) if m else ""
+
+
+def test_line_charts_jpmorgan_style(tmp_path):
+    """#25: the 4 line charts match JPMorgan Figs 7/8/9 — title '<Cat> – Monthly Prices', a FIXED Y range
+    per category (stable view as history grows), bottom legend, carrier palette, NO vertical gridlines and
+    ONE faint horizontal gridline. Automated: still cross-sheet refs into the matrix (checked elsewhere)."""
+    from mobile_tracker.excel_writer import EVOLUTION_YRANGE
+    out = _multi_day(tmp_path / "m.xlsx")
+    lines = [x for x in _chart_xmls(out) if "lineChart" in x]
+    assert len(lines) == 4
+    seen = {}
+    for xml in lines:
+        tm = re.search(r"<a:t>([^<]*Monthly Prices)</a:t>", xml)
+        assert tm, "line chart title must be '<Cat> – Monthly Prices'"
+        short = tm.group(1).split()[0]                          # Control / Post / Pre / Digital
+        val, cat = _axis_block(xml, "valAx"), _axis_block(xml, "catAx")
+        ymin = re.search(r'<(?:c:)?min val="([\d.]+)"', val)
+        ymax = re.search(r'<(?:c:)?max val="([\d.]+)"', val)
+        assert ymin and ymax, f"{short}: a FIXED Y range must be set"
+        seen[short] = (float(ymin.group(1)), float(ymax.group(1)))
+        # legend at bottom, carrier palette present
+        assert re.search(r"<(?:c:)?legendPos val=\"b\"", xml)
+        assert "0033A0" in xml and "660099" in xml and "DA291C" in xml
+        # NO vertical gridlines (category/Date axis), exactly ONE faint horizontal (value axis)
+        assert "majorGridlines" not in cat, f"{short}: no vertical gridlines"
+        assert "majorGridlines" in val and "ECECEC" in val, f"{short}: one faint horizontal gridline"
+    assert seen == {k: (float(v[0]), float(v[1])) for k, v in EVOLUTION_YRANGE.items()}
+    # sanity on the actual numbers (Post 90–170, Pre the 30-day MONTHLY value ~20–40, NOT R$/day)
+    assert seen["Post"] == (90.0, 170.0) and seen["Pre"] == (20.0, 40.0)
+
+
+def test_bar_chart_clean_no_heavy_gridlines(tmp_path):
+    """#25: the current-price bar chart (Fig-11) is clean — no vertical gridlines, one faint horizontal."""
+    out = _multi_day(tmp_path / "m.xlsx")
+    bar = next(x for x in _chart_xmls(out) if "barChart" in x)
+    assert "majorGridlines" not in _axis_block(bar, "catAx")     # no vertical gridlines
+    val = _axis_block(bar, "valAx")
+    assert "majorGridlines" in val and "ECECEC" in val           # one faint horizontal
+    assert re.search(r"<a:t>Current entry-level price by carrier \(R\$\)</a:t>", bar)
+
+
+def test_tim_bill_payment_note_on_comparison(tmp_path):
+    """#25: the comparison sheet carries the TIM bill-payment methodology footnote (JPMorgan rule)."""
+    ws = openpyxl.load_workbook(_multi_day(tmp_path / "m.xlsx"))["comparison"]
+    texts = [c.value for row in ws.iter_rows() for c in row if isinstance(c.value, str)]
+    note = next((t for t in texts if "BILL-payment" in t), None)
+    assert note is not None, "TIM bill-payment note missing from comparison"
+    assert "129,99" in note and "119,99" in note                 # entry-level vs the excluded credit-card price
+    assert "credit-card" in note.lower() and "JPMorgan" in note  # the low-adoption rule, mirrored wording
+
+
 def test_inject_cached_values_handles_all_openpyxl_v_shapes():
     """#21 regression: the injector must handle every way openpyxl serializes a formula cell — empty
     <v/> (3.1.x lxml), empty <v></v> (3.1.x stdlib), and no <v> (older) — producing exactly ONE <v> with

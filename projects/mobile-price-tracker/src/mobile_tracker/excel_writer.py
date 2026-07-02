@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pandas as pd
 from openpyxl.chart import BarChart, LineChart, Reference
+from openpyxl.chart.axis import ChartLines
 from openpyxl.chart.label import DataLabelList
 from openpyxl.chart.marker import Marker
 from openpyxl.chart.shapes import GraphicalProperties
@@ -390,22 +391,40 @@ PREPAID_MIN_VALIDITY_DAYS = 28
 EVOLUTION_CARRIERS = ["tim", "vivo", "claro"]
 EVOLUTION_DISP = {"tim": "TIM", "vivo": "Vivo", "claro": "Claro"}
 CARRIER_LINE = {"tim": "0033A0", "vivo": "660099", "claro": "DA291C"}  # series colors = tab palette
+# Fixed Y-axis ranges per category (JPMorgan Figs 7/8/9 style, #25): a STABLE view with headroom so the
+# axis doesn't jump around as daily data accumulates. Keyed by the short group title. Pre reflects the
+# 30-day MONTHLY value we show (~R$20–40), NOT JPMorgan's R$/day (the Bridge's no-avg-daily call).
+EVOLUTION_YRANGE = {"Control": (40, 70), "Post": (90, 170), "Pre": (20, 40), "Digital": (25, 65)}
 # Table-only `comparison` layout (#17): group titles row 1, TIM/Vivo/Claro sub-header row 2, day rows 3+.
 EVO_HEAD1, EVO_HEAD2, EVO_FIRST = 1, 2, 3
 
 
-def _line_chart(chart_ws, data_ws, title, c0, head_row, first, last, anchor):
+def _clean_gridlines(chart) -> None:
+    """JPMorgan look (#25): NO vertical gridlines; exactly ONE faint horizontal gridline on the value
+    axis (~0.5pt light grey). Works for both the line charts (value axis = y) and the grouped bar
+    (type='col', value axis = y)."""
+    chart.x_axis.majorGridlines = None                        # drop vertical gridlines
+    gl = ChartLines(spPr=GraphicalProperties())
+    gl.spPr.line = LineProperties(solidFill="ECECEC", w=6350)  # faint light-grey, ~0.5pt
+    chart.y_axis.majorGridlines = gl
+
+
+def _line_chart(chart_ws, data_ws, title, c0, head_row, first, last, anchor, yrange=None):
     """One per-category line chart hosted on `chart_ws` (the `Charts` sheet) but reading the matrix on
     `data_ws` (the `comparison` sheet) via CROSS-SHEET refs: X = the Date column, 3 series = the
     TIM/Vivo/Claro matrix columns. References point at the live matrix, so the charts grow as days
-    accumulate; data_ws != chart_ws, so the table sheet stays chart-free (#17/#19)."""
+    accumulate; data_ws != chart_ws, so the table sheet stays chart-free (#17/#19). JPMorgan Figs 7/8/9
+    styling (#25): bottom legend, carrier palette, markers, faint single horizontal gridline, and a FIXED
+    Y range (`yrange`) so the view is stable as history grows."""
     chart = LineChart()
     chart.title = title
     chart.y_axis.title = "R$"
     chart.x_axis.title = "Date"
     chart.height, chart.width = 7.2, 11.5
     chart.legend.position = "b"                  # legend at the bottom (clean report look, #20)
-    chart.x_axis.majorGridlines = None           # no vertical gridlines (light horizontal Y at most, #20)
+    _clean_gridlines(chart)                      # no vertical; one faint horizontal (#25)
+    if yrange:                                   # fixed Y range → stable JPMorgan-style axis (#25)
+        chart.y_axis.scaling.min, chart.y_axis.scaling.max = yrange
     data = Reference(data_ws, min_col=c0, max_col=c0 + 2, min_row=head_row, max_row=last)  # incl. names
     cats = Reference(data_ws, min_col=1, min_row=first, max_row=last)
     chart.add_data(data, titles_from_data=True)
@@ -583,6 +602,14 @@ def _write_comparison(xl, history: pd.DataFrame):
                          "all carriers in its category; subtle while prices are near-flat, differentiates "
                          "as they move). Grows one row per day; charts on the `Charts` sheet.")
     note.font = Font(name=FONT, italic=True, size=9, color="808080")
+    # TIM Post methodology note (#24/#25): the entry-level pick is the bill-payment plan, not the cheaper
+    # credit-card-only one (JPMorgan's low-adoption rule). All TIM plans still appear in history/the TIM sheet.
+    tim_note = ws.cell(row=last + 3, column=1,
+                       value="Post — TIM: the entry-level price is the cheapest BILL-payment plan "
+                             "(R$129,99), not the R$119,99 credit-card-only plan — credit-card-only plans "
+                             "have low adoption, so they are excluded from the entry-level comparison "
+                             "(JPMorgan methodology). All TIM plans still appear in `history` + the TIM sheet.")
+    tim_note.font = Font(name=FONT, italic=True, size=9, color="808080")
     ws.freeze_panes = f"B{FIRST}"      # freeze only the 2 header rows + the Date column (scrolls freely)
     ws.protection.sheet = False        # explicit: the table is never locked (the #17 "locked view" fix)
     ws.column_dimensions["A"].width = 13
@@ -605,8 +632,10 @@ def _write_charts(xl, comp_ws, first: int, last: int):
     if last >= first:                                  # nothing to chart until ≥1 day exists
         anchors = ["A3", "J3", "A20", "J20"]           # 2×2 block of line charts
         for g, (title, _c, _k) in enumerate(EVOLUTION_GROUPS):
-            _line_chart(ws, comp_ws, f"{title.split(' (')[0]} — cheapest R$ over time",
-                        2 + g * 3, EVO_HEAD2, first, last, anchors[g])
+            short = title.split(" (")[0]               # "Control" / "Post" / "Pre" / "Digital"
+            _line_chart(ws, comp_ws, f"{short} – Monthly Prices",     # JPMorgan Figs 7/8/9 title (#25)
+                        2 + g * 3, EVO_HEAD2, first, last, anchors[g],
+                        yrange=EVOLUTION_YRANGE.get(short))
         _current_price_bar(ws, comp_ws, last)          # current-price grouped bar chart (#20)
     return ws
 
@@ -646,7 +675,7 @@ def _current_price_bar(ws, comp_ws, last):
     chart.y_axis.title = "R$"
     chart.height, chart.width = 8.0, 16.0
     chart.legend.position = "b"
-    chart.x_axis.majorGridlines = None                 # no vertical gridlines (clean look)
+    _clean_gridlines(chart)                            # no vertical; one faint horizontal (#25)
     data = Reference(ws, min_col=HCOL + 1, max_col=HCOL + 3, min_row=HROW, max_row=cat_bot)  # incl names
     cats = Reference(ws, min_col=HCOL, min_row=cat_top, max_row=cat_bot)
     chart.add_data(data, titles_from_data=True)
