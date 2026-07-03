@@ -491,10 +491,10 @@ def _matrix_value(history: pd.DataFrame, carrier: str, category, kind: str, day_
     """The Python value that the matrix cell's MINIFS computes — cheapest R$ for carrier/category on the
     exact date — used to BAKE a cached value alongside the formula (#21). Same logic as `_minifs_day`:
     single = min over the category; prepaid30 = min over prepaid with validity_days>=28; digital = min
-    over lite+flex. POSTPAID additionally EXCLUDES credit-card-only plans (payment_method=="credit_card"),
-    keeping blanks — mirrors the formula's "<>credit_card" criterion, which Excel evaluates INCLUDING
-    blank cells (verified, #24). Returns a rounded float, or None for no match (→ the cell stays blank,
-    matching the formula's IF(=0,"") / IFERROR)."""
+    over lite+flex with loyalty_months>0 (#26). Postpaid = plain cheapest, credit-card-only INCLUDED
+    (#27 reverted the #24 exclusion; the payment_method tag stays in history as context). Returns a
+    rounded float, or None for no match (→ the cell stays blank, matching the formula's
+    IF(=0,"") / IFERROR)."""
     h = history[(history["carrier"] == carrier) & (history["snapshot_date"].astype(str) == day_str)]
     if kind == "prepaid30":
         v = pd.to_numeric(h.get("validity_days"), errors="coerce")
@@ -509,12 +509,8 @@ def _matrix_value(history: pd.DataFrame, carrier: str, category, kind: str, day_
         if "loyalty_months" in litep.columns:
             litep = litep[pd.to_numeric(litep["loyalty_months"], errors="coerce") > 0]
         sub = pd.concat([litep["price_brl"], h[h["category"] == "flex"]["price_brl"]])
-    else:  # single
-        hcat = h[h["category"] == category]
-        if category == "postpaid" and "payment_method" in hcat.columns:   # exclude credit-card-only (#24)
-            pm = hcat["payment_method"].astype("string").fillna("").str.strip().str.lower()
-            hcat = hcat[pm != "credit_card"]                              # blanks kept (Excel <> incl blanks)
-        sub = hcat["price_brl"]
+    else:  # single — cheapest in the category, credit-card-only INCLUDED (#27 reverted the #24 exclusion)
+        sub = h[h["category"] == category]["price_brl"]
     sub = pd.to_numeric(sub, errors="coerce").dropna()
     return round(float(sub.min()), 2) if len(sub) else None
 
@@ -532,7 +528,6 @@ def _write_comparison(xl, history: pd.DataFrame):
     _gridless(ws, TAB_COLORS["comparison"])
     pc, cc, dc, sc = _hist_cols()
     vc = get_column_letter(COLUMNS.index("validity_days") + 1)   # history validity_days column (#18)
-    pmc = get_column_letter(COLUMNS.index("payment_method") + 1)  # history payment_method column (#24)
     lc = get_column_letter(COLUMNS.index("loyalty_months") + 1)   # history loyalty_months column (#26)
     ncol = 1 + 3 * len(EVOLUTION_GROUPS)
 
@@ -566,13 +561,12 @@ def _write_comparison(xl, history: pd.DataFrame):
             c0 = 2 + g * 3
             for k, carrier in enumerate(EVOLUTION_CARRIERS):
                 if kind == "single":
-                    # POSTPAID entry-level pick EXCLUDES credit-card-only plans (JPMorgan rule, #24): TIM's
-                    # cheapest "Express" plan is R$119,99 no cartão (recurring credit card, low adoption), so
-                    # the Post column uses the cheapest BILL-payment plan (~R$129,99). Blank payment_method is
-                    # INCLUDED by Excel's "<>credit_card" (verified via COM recalc), so carriers without a
-                    # tagged credit-card plan (Vivo/Claro) are unaffected, and pre-#24 history self-heals.
-                    crit = f',history!${pmc}:${pmc},"<>credit_card"' if category == "postpaid" else ""
-                    m = _minifs_day(pc, cc, dc, sc, carrier, category, r, extra_crit=crit)
+                    # Post = the CHEAPEST postpaid plan, credit-card-only INCLUDED (#27 — Bridge reverted
+                    # the #24 exclusion): TIM's R$119,99 "Express" (no cartão) IS the tracked entry-level;
+                    # a change on it is what we want to detect (the changes sheet + the #15 alert watch its
+                    # plan_id). The payment_method TAG stays in history (#24) so credit-card vs bill is
+                    # still visible per plan — only the matrix pick stopped excluding it.
+                    m = _minifs_day(pc, cc, dc, sc, carrier, category, r)
                     formula = f'=IFERROR(IF({m}=0,"",{m}),"")'
                 elif kind == "prepaid30":   # cheapest 30-day prepaid plan (validity_days >= 28) — #18
                     crit = f',history!${vc}:${vc},">={PREPAID_MIN_VALIDITY_DAYS}"'
@@ -616,13 +610,15 @@ def _write_comparison(xl, history: pd.DataFrame):
                          "all carriers in its category; subtle while prices are near-flat, differentiates "
                          "as they move). Grows one row per day; charts on the `Charts` sheet.")
     note.font = Font(name=FONT, italic=True, size=9, color="808080")
-    # TIM Post methodology note (#24/#25): the entry-level pick is the bill-payment plan, not the cheaper
-    # credit-card-only one (JPMorgan's low-adoption rule). All TIM plans still appear in history/the TIM sheet.
+    # TIM Post methodology note (#27, reverting #24's exclusion per the Bridge): the Post column tracks the
+    # CHEAPEST postpaid plan — for TIM that is the R$119,99 credit-card-only "Express" plan — so any change
+    # on it is caught by the changes sheet + the daily alert. payment_method in history keeps the context.
     tim_note = ws.cell(row=last + 3, column=1,
-                       value="Post — TIM: the entry-level price is the cheapest BILL-payment plan "
-                             "(R$129,99), not the R$119,99 credit-card-only plan — credit-card-only plans "
-                             "have low adoption, so they are excluded from the entry-level comparison "
-                             "(JPMorgan methodology). All TIM plans still appear in `history` + the TIM sheet.")
+                       value="Post — TIM: the entry-level tracked is the cheapest postpaid plan, "
+                             "R$119,99 — note it is CREDIT-CARD-only (\"no cartão\"; TIM's Express line); "
+                             "the cheapest bill-payment (\"na fatura\") plan is R$129,99. Both are in "
+                             "`history` + the TIM sheet, with the billing type in `payment_method` — a "
+                             "price change on the tracked plan shows in `changes` and the daily alert.")
     tim_note.font = Font(name=FONT, italic=True, size=9, color="808080")
     ws.freeze_panes = f"B{FIRST}"      # freeze only the 2 header rows + the Date column (scrolls freely)
     ws.protection.sheet = False        # explicit: the table is never locked (the #17 "locked view" fix)

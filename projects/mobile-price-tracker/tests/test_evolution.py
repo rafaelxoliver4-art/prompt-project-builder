@@ -144,54 +144,35 @@ def _mk_post(carrier, name, price, date_str, payment_method=None):
     return p
 
 
-def test_post_column_excludes_credit_card_only(tmp_path):
-    """#24 (JPMorgan rule): the matrix Post pick excludes credit-card-only plans. TIM's cheaper
-    "no cartão" plan (R$119,99) is skipped, so Post shows the cheapest BILL-payment plan (R$129,99).
-    ALL plans stay in history. A carrier with no credit-card tag (blank payment_method) is unaffected."""
-    from openpyxl.utils import get_column_letter
-    from mobile_tracker.models import COLUMNS
+def test_post_column_tracks_cheapest_including_credit_card(tmp_path):
+    """#27 (Bridge reverted #24's exclusion): the matrix Post pick is the plain CHEAPEST postpaid plan —
+    TIM's R$119,99 credit-card "no cartão" plan IS the tracked entry-level (a change on it is what we
+    want to detect). The payment_method TAG is still recorded in history (billing-type context kept)."""
     out = tmp_path / "m.xlsx"
     write_workbook([
         _mk_post("tim", "TIM Black A Express 67GB", 119.99, "2026-07-01", "credit_card"),
         _mk_post("tim", "TIM Black 70GB", 129.99, "2026-07-01", "bill"),
-        _mk_post("vivo", "Vivo Pós", 150.0, "2026-07-01", None),      # untagged → unaffected
+        _mk_post("vivo", "Vivo Pós", 150.0, "2026-07-01", None),
     ], out, datetime(2026, 7, 1, 18))
 
-    # nothing dropped from history — both TIM postpaid plans are retained
+    # both TIM postpaid plans retained, still tagged with their billing type
     hist = pd.read_excel(out, sheet_name="history")
     assert "payment_method" in hist.columns
     tim_post = hist[(hist["carrier"] == "tim") & (hist["category"] == "postpaid")]
     assert {round(float(x), 2) for x in tim_post["price_brl"]} == {119.99, 129.99}
+    assert set(tim_post["payment_method"]) == {"credit_card", "bill"}
 
     fwb = openpyxl.load_workbook(out, data_only=False)
     vwb = openpyxl.load_workbook(out, data_only=True)
-    comp_f, comp_v = fwb["comparison"], vwb["comparison"]
-    pmc = get_column_letter(COLUMNS.index("payment_method") + 1)
-    post_tim_f = comp_f.cell(FIRST, 5).value                          # Post group cols 5/6/7 = TIM/Vivo/Claro
-    assert f'history!${pmc}:${pmc},"<>credit_card"' in post_tim_f     # the exclusion criterion
-    assert float(comp_v.cell(FIRST, 5).value) == 129.99              # baked = BILL plan, NOT 119.99
-    assert float(comp_v.cell(FIRST, 6).value) == 150.0              # Vivo (blank pm) unaffected
+    post_tim_f = fwb["comparison"].cell(FIRST, 5).value               # Post group cols 5/6/7 = TIM/Vivo/Claro
+    assert '"<>credit_card"' not in post_tim_f                        # no exclusion anywhere in the pick
+    assert float(vwb["comparison"].cell(FIRST, 5).value) == 119.99   # baked = the CHEAPEST (credit-card) plan
+    assert float(vwb["comparison"].cell(FIRST, 6).value) == 150.0
 
 
-def test_only_postpaid_column_gets_payment_criterion(tmp_path):
-    """#24: the credit-card exclusion applies ONLY to the Post column — Control (also a 'single' group)
-    carries no payment_method criterion."""
-    from openpyxl.utils import get_column_letter
-    from mobile_tracker.models import COLUMNS
-    out = tmp_path / "m.xlsx"
-    write_workbook([
-        _mk_post("tim", "TIM Black 70GB", 129.99, "2026-07-01", "bill"),
-        _mk("tim", "control", "TIM Controle", 58.99, "2026-07-01"),
-    ], out, datetime(2026, 7, 1, 18))
-    comp = openpyxl.load_workbook(out, data_only=False)["comparison"]
-    pmc = get_column_letter(COLUMNS.index("payment_method") + 1)
-    assert f'${pmc}:${pmc},"<>credit_card"' in comp.cell(FIRST, 5).value    # Post TIM has it
-    assert '"<>credit_card"' not in comp.cell(FIRST, 2).value               # Control TIM does not
-
-
-def test_matrix_value_postpaid_excludes_credit_card_keeps_blanks():
-    """#24 unit: _matrix_value drops credit_card for postpaid but KEEPS blanks — mirroring Excel's
-    "<>credit_card" (which includes blank cells, verified via COM recalc) so bake == formula."""
+def test_matrix_value_postpaid_plain_cheapest():
+    """#27 unit: _matrix_value postpaid = plain min over the category — credit_card included, so bake ==
+    the formula (which carries no payment criterion)."""
     from mobile_tracker.excel_writer import _matrix_value
     tagged = pd.DataFrame([
         {"carrier": "tim", "category": "postpaid", "snapshot_date": "2026-07-01",
@@ -199,16 +180,7 @@ def test_matrix_value_postpaid_excludes_credit_card_keeps_blanks():
         {"carrier": "tim", "category": "postpaid", "snapshot_date": "2026-07-01",
          "price_brl": 129.99, "payment_method": "bill"},
     ])
-    assert _matrix_value(tagged, "tim", "postpaid", "single", "2026-07-01") == 129.99  # credit excluded
-
-    # historical rows (pre-#24): blank payment_method → INCLUDED → keeps the old cheapest (self-heal)
-    blank = pd.DataFrame([
-        {"carrier": "tim", "category": "postpaid", "snapshot_date": "2026-06-22",
-         "price_brl": 119.99, "payment_method": None},
-        {"carrier": "tim", "category": "postpaid", "snapshot_date": "2026-06-22",
-         "price_brl": 129.99, "payment_method": None},
-    ])
-    assert _matrix_value(blank, "tim", "postpaid", "single", "2026-06-22") == 119.99  # blanks kept
+    assert _matrix_value(tagged, "tim", "postpaid", "single", "2026-07-01") == 119.99  # cheapest, incl. credit
 
 
 def test_digital_lite_requires_sem_fidelidade(tmp_path):
@@ -388,14 +360,16 @@ def test_bar_chart_clean_no_heavy_gridlines(tmp_path):
     assert re.search(r"<a:t>Current entry-level price by carrier \(R\$\)</a:t>", bar)
 
 
-def test_tim_bill_payment_note_on_comparison(tmp_path):
-    """#25: the comparison sheet carries the TIM bill-payment methodology footnote (JPMorgan rule)."""
+def test_tim_payment_note_on_comparison(tmp_path):
+    """#25/#27: the comparison sheet carries the TIM billing-type footnote — the tracked entry-level is
+    the cheapest plan (R$119,99, credit-card-only), with the bill-payment R$129,99 noted as context."""
     ws = openpyxl.load_workbook(_multi_day(tmp_path / "m.xlsx"))["comparison"]
     texts = [c.value for row in ws.iter_rows() for c in row if isinstance(c.value, str)]
-    note = next((t for t in texts if "BILL-payment" in t), None)
-    assert note is not None, "TIM bill-payment note missing from comparison"
-    assert "129,99" in note and "119,99" in note                 # entry-level vs the excluded credit-card price
-    assert "credit-card" in note.lower() and "JPMorgan" in note  # the low-adoption rule, mirrored wording
+    note = next((t for t in texts if "cheapest postpaid plan" in t), None)
+    assert note is not None, "TIM payment-method note missing from comparison"
+    assert "119,99" in note and "129,99" in note                 # tracked (cheapest) + the bill alternative
+    assert "CREDIT-CARD" in note and "payment_method" in note    # billing type flagged + where it lives
+    assert "changes" in note                                     # change-detection is the point (#27)
 
 
 def test_inject_cached_values_handles_all_openpyxl_v_shapes():
