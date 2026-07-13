@@ -71,6 +71,80 @@ def test_control_plans_have_no_validity():
     assert all(p.validity_days is None for p in _plans())
 
 
+_FIT_HTML = (
+    # trimmed shape of the live controle page's #price-fit section (SP, 2026-07-13): two tab blocks
+    # with the marketing price phrases + the two benefits modals carrying the stable etiqueta codes.
+    '<span id="price-fit"></span>'
+    '<div><p>Conheça as versões anual e mensal do TIM Controle Fit</p>'
+    '<tim-tab><h3>Plano anual</h3><p>Perfeito para o seu bolso</p>'
+    '<p>Tenha 30GB por 12x R$30/mês, perfeito para o bolso</p>'
+    '<button data-modal-open="modal-fit-anual">Conferir todos os benefícios</button></tim-tab>'
+    '<tim-tab><h3>Plano mensal</h3><p>Perfeito para o seu bolso</p>'
+    '<p>Tenha 20GB por R$35/mês sem comprometer seu limite do cartão</p>'
+    '<button data-modal-open="modal-fit-mensal">Conferir todos os benefícios</button></tim-tab></div>'
+    '<div id="modal-fit-anual"><p><a href="x.pdf">Etiqueta padrão - TIM202600000271 - '
+    'com prazo de permanência</a></p></div>'
+    '<div id="modal-fit-mensal"><p><a href="y.pdf">Etiqueta padrão - TIM202600000270 - '
+    'sem prazo de permanência</a></p></div>')
+
+
+def _fit_target() -> Target:
+    return Target(carrier="tim", render="html", category="fit", category_label="TIM Fit (digital)",
+                  state="SP", url="https://www.tim.com.br/sp/para-voce/planos/controle")
+
+
+def test_fit_parses_both_versions():
+    # #28: TIM Controle Fit is TEXT on the controle page (anchor #price-fit), NOT in the ofertas JSON.
+    # Anual = 30GB, 12x R$30 no cartão, 12-mo permanence; Mensal = 20GB, R$35, no commitment. plan_id =
+    # the stable etiqueta code (survives Drupal nid rotations).
+    plans = parse_tim_html(_FIT_HTML, _fit_target(), raw_ref="fx")
+    assert len(plans) == 2
+    by = {p.plan_name: p for p in plans}
+    anual = by["TIM Controle Fit Anual"]
+    assert (anual.price_brl, anual.data_gb, anual.loyalty_months) == (30.0, 30.0, 12)
+    assert anual.payment_method == "credit_card" and anual.plan_id == "tim:TIM202600000271"
+    mensal = by["TIM Controle Fit Mensal"]
+    assert (mensal.price_brl, mensal.data_gb, mensal.loyalty_months) == (35.0, 20.0, None)
+    assert mensal.payment_method is None and mensal.plan_id == "tim:TIM202600000270"
+    assert all(p.category == "fit" and p.is_valid() for p in plans)
+
+
+def test_fit_returns_empty_without_section():
+    # site restructure → no #price-fit anchor → [] (the fetch path logs a loud warning), never a crash.
+    assert parse_tim_html("<html><body>no fit here</body></html>", _fit_target()) == []
+
+
+def test_fit_price_dot_or_comma_decimal():
+    # #28 review fix: the regex tail [.,]\d{1,2} is ALWAYS a decimal separator — a dot must never be
+    # stripped as a thousands separator ('35.90' → 3590.0 would corrupt history + fire a false alert).
+    from mobile_tracker.adapters.tim import _fit_price
+    assert _fit_price("30") == 30.0
+    assert _fit_price("34,99") == 34.99
+    assert _fit_price("34.99") == 34.99
+    assert _fit_price("35.9") == 35.9
+
+
+def test_fit_code_bounded_to_its_modal_no_sibling_bleed():
+    # #28 review fix: the two fit modals are adjacent — when THIS modal's etiqueta link is missing, the
+    # code search must NOT bleed into the sibling modal (both plans would collide on one plan_id and
+    # _merge_history would silently drop a row). The per-version fallback id must fire instead.
+    html = _FIT_HTML.replace(
+        '<div id="modal-fit-anual"><p><a href="x.pdf">Etiqueta padrão - TIM202600000271 - '
+        'com prazo de permanência</a></p></div>',
+        '<div id="modal-fit-anual"><p>etiqueta em breve</p></div>')   # anual code REMOVED
+    plans = parse_tim_html(html, _fit_target())
+    by = {p.plan_name: p.plan_id for p in plans}
+    assert by["TIM Controle Fit Anual"] == "tim:fit-anual"            # fallback, NOT the mensal code
+    assert by["TIM Controle Fit Mensal"] == "tim:TIM202600000270"     # sibling untouched
+    assert len(set(by.values())) == 2                                 # ids never collide
+
+
+def test_fit_category_does_not_disturb_control_parse():
+    # the SAME page serves both targets: the control path still reads the ofertas JSON only.
+    plans = parse_tim_html(FIXTURE.read_text(encoding="utf-8"), _target(), raw_ref="fixture")
+    assert all(p.category == "control" for p in plans) and len(plans) >= 4
+
+
 def test_prepaid_validity_days_is_per_oferta_not_max():
     # #23 (fixes #18's bug): TIM prepaid validity = THIS oferta's OWN "R$<recarga> … por <N> dias", NOT
     # the max "N dias" anywhere. A shared marketing line ("recarga de R$30 válidos por 30 dias") appears

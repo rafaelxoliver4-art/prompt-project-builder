@@ -121,8 +121,93 @@ def _iter_ofertas(settings: dict) -> list[dict]:
     return out
 
 
+# --- TIM Controle Fit (#28) — TIM's digital line (Digital peer of Vivo Lite / Claro Flex) -------------
+# RECON (verified live SP, 2026-07-13): the Fit plans are NOT in the drupal-settings `ofertas` JSON.
+# They live ON the controle page as a server-rendered marketing section (anchor id="price-fit") with two
+# versions in tabs — "Plano anual" ("Tenha 30GB por 12x R$30/mês", credit card, COM prazo de permanência)
+# and "Plano mensal" ("Tenha 20GB por R$35/mês", SEM prazo de permanência). Each version's benefits modal
+# (id="modal-fit-anual"/"modal-fit-mensal") carries a STABLE etiqueta offer code ("Etiqueta padrão -
+# TIM202600000271/270") — used as the plan_id (carrier-native, non-price-derived, survives nid rotations).
+_FIT_ANUAL = re.compile(
+    r"Plano\s+anual\b.{0,300}?Tenha\s*(\d+)\s*GB\s*por\s*12x\s*R\$\s*(\d+(?:[.,]\d{1,2})?)\s*/\s*m[êe]s",
+    re.S | re.I)
+_FIT_MENSAL = re.compile(
+    r"Plano\s+mensal\b.{0,300}?Tenha\s*(\d+)\s*GB\s*por\s*R\$\s*(\d+(?:[.,]\d{1,2})?)\s*/\s*m[êe]s",
+    re.S | re.I)
+_FIT_CODE = re.compile(r"TIM\d{12,}")
+
+
+def _fit_price(s: str) -> float:
+    """'30' → 30.0 ; '34,99' → 34.99 ; '34.99' → 34.99. The regex's ``[.,]\\d{1,2}`` tail is ALWAYS a
+    decimal separator (the integer part carries no thousands dots), so a dot is never stripped —
+    stripping it would 100x the price ('35.90' → 3590). (#28, adversarial-review fix)"""
+    return float(s.replace(",", "."))
+
+
+def _fit_code(html: str, modal_id: str) -> str | None:
+    """The stable etiqueta offer code inside a Fit benefits modal — searched STRICTLY within that
+    modal's slice, bounded at the NEXT ``id="modal-`` (the two fit modals are adjacent, so an unbounded
+    window would steal the sibling's code when this modal's etiqueta link is missing — the fallback id
+    must fire instead). (#28, adversarial-review fix)"""
+    start = html.find(f'id="{modal_id}"')
+    if start == -1:
+        return None
+    end = html.find('id="modal-', start + 1)
+    m = _FIT_CODE.search(html[start:end if end != -1 else start + 80_000])
+    return m.group(0) if m else None
+
+
+def parse_tim_fit_html(html: str, target: Target, raw_ref: str | None = None) -> list[Plan]:
+    """Pure mapping: the controle page's #price-fit SECTION → the two TIM Controle Fit plans (#28).
+    Text-parsed (selectolax text + anchored regex), NOT the ofertas JSON — the Fit cards aren't in it.
+    Entry-level policy: the ANUAL version carries loyalty_months=12 (12-month permanence, 12x no cartão →
+    payment_method="credit_card"), so the Digital matrix pick — no-commitment plans only — reads the
+    MENSAL version (loyalty blank). Both stay in history. Returns [] if the section is absent (site
+    restructure) — never a crash; the FETCH path prints a loud warning on an empty fit parse, since
+    main's zero-count guard is per-CARRIER only and TIM's other categories would mask the loss."""
+    start = html.find('id="price-fit"')
+    if start == -1:
+        return []
+    section = html[start:]                                   # through the fit modals at the page tail
+    text = HTMLParser(section).text(separator=" ", strip=True)
+
+    plans: list[Plan] = []
+    seen: set[str] = set()
+    versions = [
+        # (label, regex, loyalty_months, payment, modal id with the stable code, note)
+        ("Anual", _FIT_ANUAL, 12, "credit_card", "modal-fit-anual",
+         "plano anual 12x no cartão de crédito; prazo de permanência 12m"),
+        ("Mensal", _FIT_MENSAL, None, None, "modal-fit-mensal",
+         "plano mensal, sem prazo de permanência"),
+    ]
+    for label, rx, loyalty, payment, modal_id, note in versions:
+        m = rx.search(text)
+        if not m:
+            continue
+        code = _fit_code(html, modal_id)
+        plan_id = f"tim:{code}" if code else f"tim:fit-{label.lower()}"
+        if plan_id in seen:              # sibling-code bleed guard: never collide ids (#28 review)
+            plan_id = f"tim:fit-{label.lower()}"
+        seen.add(plan_id)
+        plans.append(BaseAdapter.make_plan(
+            target,
+            plan_name=f"TIM Controle Fit {label}",
+            plan_id=plan_id,
+            price_brl=_fit_price(m.group(2)),
+            price_note=note,
+            data_gb=float(m.group(1)),
+            loyalty_months=loyalty,
+            payment_method=payment,
+            raw_ref=raw_ref,
+        ))
+    return plans
+
+
 def parse_tim_html(html: str, target: Target, raw_ref: str | None = None) -> list[Plan]:
-    """Pure mapping: TIM page HTML → list[Plan] (reads the embedded drupal-settings JSON). No network."""
+    """Pure mapping: TIM page HTML → list[Plan] (reads the embedded drupal-settings JSON). No network.
+    The `fit` category routes to the #price-fit TEXT parser (#28) — those plans aren't in the JSON."""
+    if target.category == "fit":
+        return parse_tim_fit_html(html, target, raw_ref=raw_ref)
     node = HTMLParser(html).css_first('script[data-drupal-selector="drupal-settings-json"]')
     if node is None:
         return []
@@ -197,7 +282,14 @@ class TimAdapter(BaseAdapter):
             raise RuntimeError(f"TIM {target.url}: request failed: {last_err}")
 
         raw_ref = self._save_raw(target, resp.text)
-        return parse_tim_html(resp.text, target, raw_ref=raw_ref)
+        plans = parse_tim_html(resp.text, target, raw_ref=raw_ref)
+        if target.category == "fit" and not plans:
+            # Loud CI-log trace (#28 review): the fit section is text-parsed marketing markup — if TIM
+            # restructures it, this target silently parses to 0 while TIM's other categories keep the
+            # per-carrier zero-guard in main from firing. Not fatal (collection > notification).
+            print(f"WARNING tim/fit: no plans parsed from {target.url} - "
+                  f"#price-fit section missing or restructured?")
+        return plans
 
     def _save_raw(self, target: Target, html: str) -> str:
         d = Path(self.settings.raw_capture_dir)

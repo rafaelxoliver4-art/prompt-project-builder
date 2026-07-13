@@ -32,16 +32,52 @@ def test_exactly_threshold_is_flagged():
 
 def test_new_and_removed_not_flagged():
     prev = [P("tim", "postpaid", "A", "tim:1", 100.0)]                # tim:1 removed today
-    today = [P("tim", "postpaid", "B", "tim:2", 100.0)]               # tim:2 new today
+    today = [P("tim", "postpaid", "B", "tim:2", 100.0)]               # tim:2 new today (DIFFERENT name)
     assert compute_price_alerts(prev, today, 3.0) == []
 
 
-def test_matched_by_plan_id_not_name():
-    prev = [P("claro", "control", "Controle 30GB", "claro:30gb", 100.0)]
-    today_diff_id = [P("claro", "control", "Controle 30GB", "claro:30gb-gaming", 200.0)]  # same name, diff id
-    assert compute_price_alerts(prev, today_diff_id, 3.0) == []       # not the same plan → no alert
-    today_same_id = [P("claro", "control", "Controle 30GB", "claro:30gb", 110.0)]
-    assert len(compute_price_alerts(prev, today_same_id, 3.0)) == 1
+def test_id_rotation_falls_back_to_name_match():
+    """#29 (the missed TIM alert, 2026-07-06): TIM republished EVERY Controle plan under a fresh Drupal
+    nid while cutting prices — id-matching saw remove+add and no alert went out. Same-name unmatched
+    plans now pair across the rotation, so the real moves are flagged; same-price re-keys stay silent."""
+    prev = [P("tim", "control", "TIM Controle 41GB", "tim:162901", 58.99),
+            P("tim", "control", "TIM Controle Plus 45GB", "tim:155891", 64.99),
+            P("tim", "control", "TIM Controle Premium 53GB", "tim:162896", 84.99),
+            P("tim", "control", "TIM Controle Light Express 31GB", "tim:143536", 60.99),
+            P("tim", "control", "TIM Controle Pro Express", "tim:143576", 64.99)]
+    today = [P("tim", "control", "TIM Controle 41GB", "tim:167036", 49.99),          # −15.3%
+             P("tim", "control", "TIM Controle Plus 45GB", "tim:167031", 59.99),     # −7.7%
+             P("tim", "control", "TIM Controle Premium 53GB", "tim:167041", 69.99),  # −17.6%
+             P("tim", "control", "TIM Controle Light Express 31GB", "tim:167046", 60.99),  # re-key only
+             P("tim", "control", "TIM Controle Pro Express", "tim:167051", 64.99)]         # re-key only
+    found = compute_price_alerts(prev, today, 3.0)
+    assert {a.plan_name for a in found} == {"TIM Controle 41GB", "TIM Controle Plus 45GB",
+                                            "TIM Controle Premium 53GB"}
+    assert found[0].plan_name == "TIM Controle Premium 53GB"          # sorted by |pct| desc (−17.6% first)
+    assert all(a.direction == "▼" for a in found)
+
+
+def test_rotation_ambiguous_names_not_paired():
+    """#29 guard: the name fallback pairs ONLY 1:1 — duplicated names on either unmatched side must
+    not produce a (possibly false) alert."""
+    prev = [P("tim", "control", "Dup", "tim:1", 100.0),
+            P("tim", "control", "Dup", "tim:2", 200.0)]               # two prev plans, same name
+    today = [P("tim", "control", "Dup", "tim:9", 150.0)]              # which one is it? → don't guess
+    assert compute_price_alerts(prev, today, 3.0) == []
+    prev2 = [P("tim", "control", "Dup", "tim:1", 100.0)]
+    today2 = [P("tim", "control", "Dup", "tim:8", 150.0),
+              P("tim", "control", "Dup", "tim:9", 150.0)]             # two claimants today → don't guess
+    assert compute_price_alerts(prev2, today2, 3.0) == []
+
+
+def test_rotation_fallback_still_id_first():
+    """#29: an intact id match wins; the fallback only engages for ids that VANISHED. A plan whose id
+    survives is never re-paired by name, and its leftover-free name can't be claimed."""
+    prev = [P("claro", "control", "Controle 30GB", "claro:a", 100.0)]
+    today = [P("claro", "control", "Controle 30GB", "claro:a", 110.0),  # id match: +10% → alert
+             P("claro", "control", "Controle 30GB", "claro:b", 999.0)]  # new same-name card: NOT paired
+    found = compute_price_alerts(prev, today, 3.0)
+    assert len(found) == 1 and found[0].plan_id == "claro:a" and abs(found[0].pct - 10.0) < 1e-9
 
 
 def test_format_email_subject_and_body():

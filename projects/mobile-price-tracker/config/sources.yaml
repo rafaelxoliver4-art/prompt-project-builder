@@ -106,3 +106,9 @@ carriers:
       postpaid:
         label: Pós (TIM Black)
         url: https://www.tim.com.br/{state}/para-voce/planos/pos-pago/tim-black
+      # TIM Controle Fit (#28) — TIM's digital line (Digital peer of Vivo Lite / Claro Flex). The plans
+      # live ON the controle page (anchor #price-fit) as server-rendered TEXT, NOT in the ofertas JSON,
+      # so this is a separate target on the same URL with a dedicated parser path (category == "fit").
+      fit:
+        label: TIM Fit (digital)
+        url: https://www.tim.com.br/{state}/para-voce/planos/controle

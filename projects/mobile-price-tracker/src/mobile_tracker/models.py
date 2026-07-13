@@ -36,7 +36,8 @@ COLUMNS: list[str] = [
     "raw_ref",
 ]
 
-VALID_CATEGORIES = {"postpaid", "control", "prepaid", "lite", "flex"}
+# "fit" = TIM Controle Fit (#28) — TIM's digital line, the Digital peer of Vivo lite / Claro flex.
+VALID_CATEGORIES = {"postpaid", "control", "prepaid", "lite", "flex", "fit"}
 VALID_CARRIERS = {"vivo", "claro", "tim"}
 
 

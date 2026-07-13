@@ -222,6 +222,46 @@ def test_matrix_value_digital_lite_loyalty_gated():
     assert _matrix_value(old, "vivo", None, "digital", "2026-06-22") is None    # pre-#23 → blank (self-heal)
 
 
+def test_digital_tim_fit_mensal_sets_entry(tmp_path):
+    """#28: TIM Controle Fit joins the Digital column. Its two versions are SEPARATE plans — the Anual
+    (R$30, loyalty_months=12, 12-mo permanence) must NOT set the entry; the no-commitment Mensal (R$35,
+    loyalty blank) does. The formula gains a fit MINIFS gated on loyalty_months BLANK (criterion "=");
+    lite/flex behavior unchanged; both fit versions stay in history."""
+    from openpyxl.utils import get_column_letter
+    from mobile_tracker.models import COLUMNS
+    out = tmp_path / "m.xlsx"
+    anual = _mk("tim", "fit", "TIM Controle Fit Anual", 30.0, "2026-07-13"); anual.loyalty_months = 12
+    mensal = _mk("tim", "fit", "TIM Controle Fit Mensal", 35.0, "2026-07-13")     # no commitment
+    el30 = _mk("vivo", "lite", "Easy Lite 30", 45.0, "2026-07-13"); el30.loyalty_months = 12
+    flex = _mk("claro", "flex", "Flex 15", 44.9, "2026-07-13")
+    write_workbook([anual, mensal, el30, flex], out, datetime(2026, 7, 13, 18))
+    fwb = openpyxl.load_workbook(out, data_only=False)
+    vwb = openpyxl.load_workbook(out, data_only=True)
+    lc = get_column_letter(COLUMNS.index("loyalty_months") + 1)
+    dig_tim_f = fwb["comparison"].cell(FIRST, 11).value                   # Digital group K/L/M = TIM/Vivo/Claro
+    assert '"fit"' in dig_tim_f                                           # fit joined the Digital pick
+    assert f'history!${lc}:${lc},"="' in dig_tim_f                        # …gated on loyalty BLANK
+    assert float(vwb["comparison"].cell(FIRST, 11).value) == 35.0        # TIM Digital = the Mensal, not R$30
+    assert float(vwb["comparison"].cell(FIRST, 12).value) == 45.0        # Vivo lite unchanged (#26)
+    assert float(vwb["comparison"].cell(FIRST, 13).value) == 44.9        # Claro flex unchanged
+    hist = pd.read_excel(out, sheet_name="history")
+    fitp = {round(float(x), 2) for x in hist[(hist.carrier == "tim") & (hist.category == "fit")]["price_brl"]}
+    assert fitp == {30.0, 35.0}                                           # both versions kept in history
+
+
+def test_matrix_value_digital_fit_requires_no_commitment():
+    """#28 unit: _matrix_value digital keeps only fit plans with loyalty_months BLANK (the Mensal);
+    the Anual (loyalty 12) is excluded — mirroring the formula's "=" criterion so bake == formula."""
+    from mobile_tracker.excel_writer import _matrix_value
+    df = pd.DataFrame([
+        {"carrier": "tim", "category": "fit", "snapshot_date": "2026-07-13", "price_brl": 30.0, "loyalty_months": 12},
+        {"carrier": "tim", "category": "fit", "snapshot_date": "2026-07-13", "price_brl": 35.0, "loyalty_months": None},
+    ])
+    assert _matrix_value(df, "tim", None, "digital", "2026-07-13") == 35.0      # Mensal; Anual excluded
+    only_anual = df[df["loyalty_months"].notna()]
+    assert _matrix_value(only_anual, "tim", None, "digital", "2026-07-13") is None   # loyalty-only → blank
+
+
 def test_heatmap_colorscale_present(tmp_path):
     wb = openpyxl.load_workbook(_multi_day(tmp_path / "m.xlsx"))
     assert len(list(wb["comparison"].conditional_formatting)) >= 1

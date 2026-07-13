@@ -132,6 +132,24 @@ def _merge_history(existing: pd.DataFrame, fresh: pd.DataFrame) -> pd.DataFrame:
     return df.reindex(columns=COLUMNS)
 
 
+def _rotation_pairs(cur, old, new_keys, gone_keys) -> dict:
+    """Id-ROTATION fallback (#29): carriers republish plans with fresh native ids (TIM rotated every
+    Drupal nid on 2026-07-06 while cutting Controle prices −15%), which turns real price changes into
+    invisible "removed"+"new" pairs. Pair the id-unmatched rows by (carrier, state, category, plan_name)
+    — names survive rotations — but ONLY when the name maps 1:1 on both sides (ambiguity → keep the
+    honest new/removed rows). Returns {new_key: old_key}."""
+    def by_name(frame, keys):
+        m: dict = {}
+        for k in keys:
+            r = frame.loc[k]
+            nk = (str(r["carrier"]), str(r["state"]), str(r["category"]), str(r["plan_name"]))
+            m.setdefault(nk, []).append(k)
+        return m
+    news, olds = by_name(cur, new_keys), by_name(old, gone_keys)
+    return {ks[0]: olds[nk][0] for nk, ks in news.items()
+            if len(ks) == 1 and len(olds.get(nk, [])) == 1}
+
+
 def _compute_changes(history: pd.DataFrame) -> pd.DataFrame:
     cols = ["change_type", "carrier", "category", "state", "plan_id", "plan_name",
             "old_price_brl", "new_price_brl", "delta_brl"]
@@ -147,11 +165,26 @@ def _compute_changes(history: pd.DataFrame) -> pd.DataFrame:
     def base(r):  # carrier, category, state, plan_id, plan_name — matched by (carrier, state, plan_id)
         return [r["carrier"], r["category"], r["state"], r["plan_id"], r["plan_name"]]
 
+    new_keys = cur.index.difference(old.index)
+    gone_keys = old.index.difference(cur.index)
+    # id-rotation fallback (#29): unambiguous same-name pairs are the SAME plan re-keyed — compare
+    # prices (a real move → price_change with the NEW id; same price → a pure re-key, no row at all).
+    rotated = _rotation_pairs(cur, old, new_keys, gone_keys)
+    consumed_old = set(rotated.values())
+
     out = []
-    for k in cur.index.difference(old.index):
+    for k in new_keys:
         r = cur.loc[k]
+        if k in rotated:
+            o = old.loc[rotated[k]]
+            np_, op = r["price_brl"], o["price_brl"]
+            if pd.notna(np_) and pd.notna(op) and float(np_) != float(op):
+                out.append(["price_change", *base(r), op, np_, float(np_) - float(op)])
+            continue
         out.append(["new", *base(r), None, r["price_brl"], None])
-    for k in old.index.difference(cur.index):
+    for k in gone_keys:
+        if k in consumed_old:
+            continue
         r = old.loc[k]
         out.append(["removed", *base(r), r["price_brl"], None, None])
     for k in cur.index.intersection(old.index):
@@ -196,13 +229,21 @@ COMPARE_GROUPS = [
     ("Control / Hybrid", ["control"], None),
     ("Prepaid", ["prepaid"],
      "Note: prepaid is not a clean unit — Claro Prezão is a daily fee (R$1/dia) vs Vivo/TIM recharge amounts."),
-    ("Digital", ["lite", "flex"],
-     "Digital = Vivo Lite + Claro Flex (TIM has no digital line)."),
+    ("Digital", ["lite", "flex", "fit"],
+     "Digital = Vivo Lite + Claro Flex + TIM Fit (#28); entry-level = no-commitment versions."),
 ]
 
 
 def _ranked(latest: pd.DataFrame, cats, carrier: str):
     df = latest[(latest["carrier"] == carrier) & (latest["category"].isin(cats))]
+    if "fit" in cats and "loyalty_months" in df.columns:
+        # Digital ranking compares NO-COMMITMENT entry prices (the in-sheet note says so): a fit version
+        # whose OWN headline price requires loyalty (the Anual, #28) would rank apples-to-oranges against
+        # Vivo/Claro no-commitment prices — drop it HERE only (it stays in history + the TIM sheet).
+        # Lite toggle cards already headline the no-commitment price (loyalty price is the promo), so
+        # only fit needs this. (#28, adversarial-review fix)
+        loy = pd.to_numeric(df["loyalty_months"], errors="coerce")
+        df = df[~((df["category"] == "fit") & (loy > 0))]
     df = df.dropna(subset=["price_brl"]).sort_values("price_brl", kind="stable")
     return list(df[["price_brl", "plan_name", "data_gb", "price_promo_brl"]]
                 .itertuples(index=False, name=None))
@@ -283,7 +324,7 @@ OPERATOR_DISPLAY = {"vivo": "Vivo", "claro": "Claro", "tim": "TIM"}
 OPERATOR_CATEGORY_ORDER = [
     ("Postpaid", ["postpaid"]),
     ("Control", ["control"]),
-    ("Digital", ["lite", "flex"]),
+    ("Digital", ["lite", "flex", "fit"]),
     ("Prepaid", ["prepaid"]),
 ]
 OPERATOR_COLUMNS = ["Plan", "Price R$", "Promo R$", "Data", "Voice",
@@ -508,7 +549,14 @@ def _matrix_value(history: pd.DataFrame, carrier: str, category, kind: str, day_
         litep = h[h["category"] == "lite"]
         if "loyalty_months" in litep.columns:
             litep = litep[pd.to_numeric(litep["loyalty_months"], errors="coerce") > 0]
-        sub = pd.concat([litep["price_brl"], h[h["category"] == "flex"]["price_brl"]])
+        # TIM Fit (#28) is the OPPOSITE shape: the two versions are SEPARATE plans, and the version whose
+        # headline requires NO commitment is the Mensal (loyalty_months blank); the Anual's own price
+        # (R$30) requires 12-mo permanence → excluded from the entry pick (kept in history).
+        fitp = h[h["category"] == "fit"]
+        if "loyalty_months" in fitp.columns:
+            fitp = fitp[pd.to_numeric(fitp["loyalty_months"], errors="coerce").isna()]
+        sub = pd.concat([litep["price_brl"], h[h["category"] == "flex"]["price_brl"],
+                         fitp["price_brl"]])
     else:  # single — cheapest in the category, credit-card-only INCLUDED (#27 reverted the #24 exclusion)
         sub = h[h["category"] == category]["price_brl"]
     sub = pd.to_numeric(sub, errors="coerce").dropna()
@@ -572,10 +620,10 @@ def _write_comparison(xl, history: pd.DataFrame):
                     crit = f',history!${vc}:${vc},">={PREPAID_MIN_VALIDITY_DAYS}"'
                     m = _minifs_day(pc, cc, dc, sc, carrier, "prepaid", r, extra_crit=crit)
                     formula = f'=IFERROR(IF({m}=0,"",{m}),"")'
-                else:  # digital = cheapest of lite OR flex that day; "" if the carrier has neither.
+                else:  # digital = cheapest of lite OR flex OR fit that day; "" if the carrier has none.
                     # reciprocal-max picks the smaller positive price: a day's MINIFS returns 0 on
                     # no-match (and no real plan is priced 0), so 1/0 → IFERROR → 0, and MAX keeps the
-                    # larger reciprocal = the smaller price; both absent → MAX(0,0)=0 → 1/0 → "".
+                    # larger reciprocal = the smaller price; all absent → MAX(0,…)=0 → 1/0 → "".
                     # LITE requires loyalty_months > 0 (#26): only plans that OFFER a "Sem fidelidade" choice
                     # (a monthly/annual toggle card) count, so the monthly-ONLY 20GB "Plano mensal" R$35 is
                     # excluded and the entry-level is the cheapest Sem-fidelidade plan (Vivo → R$45). Excel
@@ -583,7 +631,13 @@ def _write_comparison(xl, history: pd.DataFrame):
                     lite = _minifs_day(pc, cc, dc, sc, carrier, "lite", r,
                                        extra_crit=f',history!${lc}:${lc},">0"')
                     flex = _minifs_day(pc, cc, dc, sc, carrier, "flex", r)   # Flex has no toggle → unrestricted
-                    formula = f'=IFERROR(1/MAX(IFERROR(1/{lite},0),IFERROR(1/{flex},0)),"")'
+                    # FIT (TIM, #28) is the OPPOSITE of lite: its versions are SEPARATE plans, and only the
+                    # no-commitment Mensal (loyalty_months BLANK — criterion "=") sets the entry; the Anual's
+                    # own price requires 12-mo permanence → excluded (stays in history/the TIM sheet).
+                    fit = _minifs_day(pc, cc, dc, sc, carrier, "fit", r,
+                                      extra_crit=f',history!${lc}:${lc},"="')
+                    formula = (f'=IFERROR(1/MAX(IFERROR(1/{lite},0),IFERROR(1/{flex},0),'
+                               f'IFERROR(1/{fit},0)),"")')
                 cell = ws.cell(row=r, column=c0 + k, value=formula)
                 cell.number_format = CURRENCY_FMT
                 cell.font = Font(name=FONT)
@@ -606,7 +660,9 @@ def _write_comparison(xl, history: pd.DataFrame):
                          "locale-safe text date built from the row's date, since history stores dates as "
                          "TEXT — CONTEXT §7). Pre = cheapest 30-day prepaid plan (validity_days >= 28; "
                          "pre-#18 dates have no validity → blank, fills from 26-Jun on). Digital = min of "
-                         "Vivo Lite / Claro Flex. Heatmap = per-category-block green→yellow (each cell vs "
+                         "Vivo Lite / Claro Flex / TIM Fit — no-commitment versions only (lite: the Sem-"
+                         "fidelidade price of toggle cards, #26; fit: the Mensal version, #28). Heatmap = "
+                         "per-category-block green→yellow (each cell vs "
                          "all carriers in its category; subtle while prices are near-flat, differentiates "
                          "as they move). Grows one row per day; charts on the `Charts` sheet.")
     note.font = Font(name=FONT, italic=True, size=9, color="808080")

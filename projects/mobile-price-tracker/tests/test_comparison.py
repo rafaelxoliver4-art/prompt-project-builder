@@ -54,7 +54,29 @@ def test_digital_pulls_lite_and_flex_tim_empty():
     dig = _groups()["Digital"]
     assert [r[1] for r in dig["per_carrier"]["vivo"]] == ["Easy Lite"]   # vivo lite
     assert [r[1] for r in dig["per_carrier"]["claro"]] == ["Flex 15"]    # claro flex
-    assert dig["per_carrier"]["tim"] == []                               # TIM has no digital line
+    assert dig["per_carrier"]["tim"] == []                               # no fit rows in this fixture
+
+
+def test_digital_ranking_excludes_loyalty_fit_version():
+    # #28 review fix: the Digital ranking compares NO-COMMITMENT entry prices (per its in-sheet note).
+    # TIM Fit's Anual version — whose OWN headline price requires 12-mo permanence — must not rank
+    # (rank-1 TIM R$30 vs competitors' no-commitment prices would be apples-to-oranges and contradict
+    # the caption); the Mensal ranks. Both stay in history/the TIM sheet (not this view's concern).
+    rows = [
+        dict(carrier="tim", category="fit", plan_name="TIM Controle Fit Anual", price_brl=30.0,
+             data_gb=30.0, price_promo_brl=None, loyalty_months=12),
+        dict(carrier="tim", category="fit", plan_name="TIM Controle Fit Mensal", price_brl=35.0,
+             data_gb=20.0, price_promo_brl=None, loyalty_months=None),
+        dict(carrier="vivo", category="lite", plan_name="Easy Lite 30", price_brl=45.0,
+             data_gb=30.0, price_promo_brl=30.0, loyalty_months=12),
+        dict(carrier="claro", category="flex", plan_name="Flex 15", price_brl=44.9,
+             data_gb=15.0, price_promo_brl=None, loyalty_months=None),
+    ]
+    dig = {g["title"]: g for g in build_comparison_data(pd.DataFrame(rows))}["Digital"]
+    assert [r[1] for r in dig["per_carrier"]["tim"]] == ["TIM Controle Fit Mensal"]   # Anual excluded
+    assert dig["per_carrier"]["tim"][0][0] == 35.0                                    # rank-1 TIM = R$35
+    assert [r[1] for r in dig["per_carrier"]["vivo"]] == ["Easy Lite 30"]             # lite untouched
+    assert [r[1] for r in dig["per_carrier"]["claro"]] == ["Flex 15"]                 # flex untouched
 
 
 def test_prepaid_group_carries_unit_caveat():

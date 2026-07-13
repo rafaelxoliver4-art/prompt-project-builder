@@ -3,7 +3,8 @@
 After each live scrape, compare today's snapshot to the previous one and email a digest of every plan
 whose headline price moved >= the threshold (default 3%, up OR down). Matching is by
 (carrier, state, plan_id) — the same identity the `changes` sheet uses — so the alert and the sheet
-agree. New/removed plans are NOT price-move alerts.
+agree, with an id-ROTATION fallback by plan name (#29, mirrored in `_compute_changes`): see
+`compute_price_alerts`. Genuinely new/removed plans are NOT price-move alerts.
 
 SECURITY: the SMTP password is read ONLY from the EMAIL_APP_PASSWORD environment variable (a GitHub
 Actions Secret). It is never hardcoded, printed, logged, or committed. Addresses + threshold live in
@@ -48,17 +49,44 @@ def _key(p):
     return (getattr(p, "carrier", None), getattr(p, "state", None), getattr(p, "plan_id", None))
 
 
+def _name_key(p):
+    return (getattr(p, "carrier", None), getattr(p, "state", None),
+            getattr(p, "category", None), getattr(p, "plan_name", None))
+
+
 def compute_price_alerts(prev_plans, today_plans, threshold_pct: float) -> list[Alert]:
     """Pure: plans present in BOTH snapshots whose price moved >= threshold_pct (either direction),
-    matched by (carrier, state, plan_id). New/removed plans are not flagged. Sorted by |pct| desc."""
+    matched by (carrier, state, plan_id) — with an id-ROTATION fallback (#29): carriers republish
+    plans under fresh native ids (TIM rotated every Drupal nid on 2026-07-06 while cutting Controle
+    −15%), which made real moves look like remove+add and silently skipped the alert. Id-unmatched
+    plans are therefore re-paired by (carrier, state, category, plan_name) — names are stable across
+    rotations — and ONLY when that name is unique on both unmatched sides (ambiguity → no pairing, no
+    false alert). Genuinely new/removed plans are still not flagged. Sorted by |pct| desc."""
     prev = {}
     for p in prev_plans:
         k = _key(p)
         if k[2] and _num(getattr(p, "price_brl", None)) is not None:
             prev[k] = p
+    # rotation fallback index (#29): yesterday's plans whose id vanished today, keyed by name
+    today_ids = {_key(p) for p in today_plans}
+    leftover_by_name: dict = {}
+    for k, p in prev.items():
+        if k not in today_ids:
+            leftover_by_name.setdefault(_name_key(p), []).append(p)
+    # today-side uniqueness guard: two same-name id-unmatched plans must not both claim one leftover
+    unmatched_today_names: dict = {}
+    for p in today_plans:
+        if _key(p) not in prev:
+            nk = _name_key(p)
+            unmatched_today_names[nk] = unmatched_today_names.get(nk, 0) + 1
+
     out: list[Alert] = []
     for p in today_plans:
         old = prev.get(_key(p))
+        if old is None:                                    # id rotated? try the unambiguous name match
+            cands = leftover_by_name.get(_name_key(p), [])
+            if len(cands) == 1 and unmatched_today_names.get(_name_key(p)) == 1:
+                old = cands[0]
         if old is None:
             continue
         op, np_ = _num(old.price_brl), _num(p.price_brl)

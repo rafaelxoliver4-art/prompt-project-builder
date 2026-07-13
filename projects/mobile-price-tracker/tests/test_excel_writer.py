@@ -46,6 +46,51 @@ def test_history_is_append_only_and_changes_detected(tmp_path):
     assert abs(delta - 10.0) < 1e-9
 
 
+def _idplan(name, pid, price, date, carrier="tim", cat="control"):
+    p = Plan(carrier=carrier, category=cat, state="SP", plan_name=name, plan_id=pid,
+             price_brl=price, source_url="http://x")
+    p.snapshot_date = date
+    p.snapshot_ts = f"{date}T23:00:00"
+    return p
+
+
+def test_changes_survive_plan_id_rotation(tmp_path):
+    """#29 (the missed TIM alert): the carrier republishes the SAME plans under fresh native ids.
+    The changes sheet must report the real price moves as price_change (via the unambiguous same-name
+    pairing) — not a wall of removed+new — and a pure re-key (same name, same price) must be silent."""
+    out = tmp_path / "plans.xlsx"
+    write_workbook([_idplan("TIM Controle 41GB", "tim:162901", 58.99, "2026-07-05"),
+                    _idplan("TIM Controle Premium 53GB", "tim:162896", 84.99, "2026-07-05"),
+                    _idplan("TIM Controle Pro Express", "tim:143576", 64.99, "2026-07-05")],
+                   out, datetime(2026, 7, 5, 23))
+    write_workbook([_idplan("TIM Controle 41GB", "tim:167036", 49.99, "2026-07-06"),      # −15.3%
+                    _idplan("TIM Controle Premium 53GB", "tim:167041", 69.99, "2026-07-06"),  # −17.6%
+                    _idplan("TIM Controle Pro Express", "tim:167051", 64.99, "2026-07-06")],  # re-key only
+                   out, datetime(2026, 7, 6, 23))
+    changes = pd.read_excel(out, sheet_name="changes")
+    kinds = dict(zip(changes["plan_name"], changes["change_type"]))
+    assert kinds == {"TIM Controle 41GB": "price_change",
+                     "TIM Controle Premium 53GB": "price_change"}     # re-key row absent; NO new/removed
+    row = changes[changes.plan_name == "TIM Controle 41GB"].iloc[0]
+    assert row["plan_id"] == "tim:167036"                             # reported under the NEW id
+    assert abs(float(row["delta_brl"]) + 9.0) < 1e-9
+    # history keeps BOTH days' rows untouched (rotation affects only the diff view)
+    hist = pd.read_excel(out, sheet_name="history")
+    assert len(hist) == 6
+
+
+def test_changes_rotation_ambiguous_names_stay_new_removed(tmp_path):
+    """#29 guard: duplicated names among the unmatched rows must NOT pair — keep honest new+removed."""
+    out = tmp_path / "plans.xlsx"
+    write_workbook([_idplan("Dup", "tim:1", 100.0, "2026-07-05"),
+                    _idplan("Dup", "tim:2", 200.0, "2026-07-05")],
+                   out, datetime(2026, 7, 5, 23))
+    write_workbook([_idplan("Dup", "tim:9", 150.0, "2026-07-06")],
+                   out, datetime(2026, 7, 6, 23))
+    changes = pd.read_excel(out, sheet_name="changes")
+    assert sorted(changes["change_type"]) == ["new", "removed", "removed"]   # no guessed pairing
+
+
 def test_merge_history_enforces_schema_order(tmp_path):
     # #18 regression: a pre-#18 history (no validity_days column) merged with new rows that DO have it
     # must keep COLUMNS order — otherwise pd.concat appends validity_days at the end and the matrix's
