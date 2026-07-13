@@ -124,6 +124,25 @@ def test_lite_no_commitment_price_with_loyalty_promo():
     assert by_gb[20].loyalty_months is None
 
 
+def test_lite_lost_toggle_detector():
+    # #30 (Bridge standing rule: NO loyalty headline prices, ever): a lite parse where NO plan carries
+    # loyalty_months means the "Sem fidelidade" click silently failed and the headlines are the LOYALTY
+    # defaults (the 2026-07-12 incident) — fetch retries the render once and warns loudly. Pure helper.
+    from mobile_tracker.adapters.vivo import lite_capture_lost_toggle
+    from mobile_tracker.models import Plan
+    ok = [Plan(carrier="vivo", category="lite", state="SP", plan_name="EL30", plan_id="vivo:a-30gb",
+               price_brl=45.0, loyalty_months=12),
+          Plan(carrier="vivo", category="lite", state="SP", plan_name="EL20", plan_id="vivo:b-20gb",
+               price_brl=35.0)]
+    assert lite_capture_lost_toggle(ok) is False               # toggle captured → healthy
+    lost = [Plan(carrier="vivo", category="lite", state="SP", plan_name="EL30", plan_id="vivo:a-30gb",
+                 price_brl=30.0),
+            Plan(carrier="vivo", category="lite", state="SP", plan_name="EL20", plan_id="vivo:b-20gb",
+                 price_brl=35.0)]
+    assert lite_capture_lost_toggle(lost) is True              # all single-price → toggle likely failed
+    assert lite_capture_lost_toggle([]) is False               # empty parse is a different failure
+
+
 def test_promo_captured_from_struck_price():
     # a struck-through original price (.unique-card__price-old) → regular vs. effective
     html = ('<div class="unique-card"><div class="unique-card__plan">Vivo Pós Teste</div>'

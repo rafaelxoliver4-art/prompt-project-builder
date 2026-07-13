@@ -144,6 +144,15 @@ def parse_vivo_html(html: str, target: Target, raw_ref: str | None = None) -> li
     return plans
 
 
+def lite_capture_lost_toggle(plans) -> bool:
+    """True when a LITE parse produced plans but NONE carries loyalty_months. On the live page most
+    Easy Lite cards have the anual/mensal toggle, so an all-single-price parse almost certainly means
+    the "Sem fidelidade" click silently FAILED and the captured headline prices are the LOYALTY
+    defaults — which violates the Bridge's standing no-loyalty-headline rule (CONTEXT §10; the
+    2026-07-12 snapshot did exactly this). Pure — unit-testable offline. (#30)"""
+    return bool(plans) and not any(getattr(p, "loyalty_months", None) for p in plans)
+
+
 class VivoAdapter(BaseAdapter):
     carrier = "vivo"
 
@@ -152,7 +161,21 @@ class VivoAdapter(BaseAdapter):
                                   self.cfg.get("max_delay_seconds", 6)))
         html = self._render(target.url, target.category)
         raw_ref = self._save_raw(target, html)
-        return parse_vivo_html(html, target, raw_ref=raw_ref)
+        plans = parse_vivo_html(html, target, raw_ref=raw_ref)
+        if target.category == "lite" and lite_capture_lost_toggle(plans):
+            # No-loyalty-headline rule (#30): a lite parse with zero loyalty_months means the toggle
+            # click likely failed and these headlines are LOYALTY prices. Retry the render ONCE
+            # (bounded — politeness per GOVERNANCE §3), then record as-is but LOUDLY.
+            print("WARNING vivo/lite: no 'Sem fidelidade' price captured (toggle click failed?) - "
+                  "retrying the render once")
+            html = self._render(target.url, target.category)
+            raw_ref = self._save_raw(target, html)
+            plans = parse_vivo_html(html, target, raw_ref=raw_ref)
+            if lite_capture_lost_toggle(plans):
+                print("WARNING vivo/lite: retry STILL lacks a loyalty-toggle capture - headline "
+                      "prices may be LOYALTY prices (no-loyalty-headline rule, CONTEXT §10); "
+                      "check the page markup")
+        return plans
 
     def _render(self, url: str, category: str | None = None) -> str:
         # Imported lazily so the module (and the pure parser) import fine without a browser.
