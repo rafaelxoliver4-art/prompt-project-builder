@@ -1,6 +1,6 @@
 # CONTEXT — Mobile Price Tracker
 
-> **Version:** 0.7.0 · **Last updated:** 2026-07-17 · Content decided by the Architect; written by Code.
+> **Version:** 0.7.1 · **Last updated:** 2026-07-17 · Content decided by the Architect; written by Code.
 > The *what / how / why* of this project and every decision behind it. This is the knowledge base and
 > IP. If someone read only this file, they should understand the project well enough to rebuild it.
 > **Standing rule (Bridge):** every CODE TASK ends by updating this file (durable knowledge) AND
@@ -377,6 +377,7 @@ Spot-checked the `comparison` sheet against the carriers' official pages + indep
 5. **NO LOYALTY HEADLINE PRICES — EVER (standing rule, 2026-07-13).** The tracked headline / entry-level price is **always the monthly price WITHOUT a loyalty/fidelity commitment** — for every carrier and category, **including TIM Fit**. Loyalty prices ("fidelidade" / "plano anual" / "prazo de permanência") are recorded only as context (`price_promo_brl` + `loyalty_months`) and are **excluded from every entry-level pick and cross-carrier ranking**. Applications: Vivo Easy Lite headline = the "Sem fidelidade" toggle price (#23/#26); TIM Fit entry = the Mensal, the Anual excluded (#28); any future loyalty-gated plan gets the same treatment. Distinct from payment method (the #27 Post decision — that's about billing rails, not commitment). Enforced fail-loud: the Vivo lite fetch detects a lost toggle capture and retries + warns (#30).
 
 ## 11. Changelog
+- **0.7.1 — 2026-07-17** — CODE TASK #26 (Bridge numbering; the repo's earlier "#26" was the 0.5.8 Vivo-Lite metric task): convergent-offers English snapshot — `analysis/convergent_offers/convergent_offers_2026-07.xlsx` (TIM Ultracombo 7 rows from TIM's published table verified vs Teletime, **Vivo Total 11 combos + Claro Multi 5 combos scraped live**, SP; unified 5-column English format incl. "Other Benefits"; every row sourced; prices numeric with TIM's `*` applied via number format). Entry face-off as verified: **TIM R$ 89.99\*** (65GB+500 Mbps, SP-only, débito automático) vs **Claro R$ 129.80** (Controle 41GB+350 Mbps, limited-time — the recon lead's R$ 159.90 is the "Melhor escolha" mid-tier, not the entry) vs **Vivo R$ 160** (Total Pro 60GB+500 Mbps). The `*` footnote CONFIRMED from TIM's table caption via Teletime: "Ofertas disponíveis apenas em São Paulo" + all TIM prices are débito-automático prices. New **§13** with the two pages' parse paths (Vivo Total = same Playwright+`.unique-card` IP as §3; Claro Multi = `tab_select` grid, benefits in `__NEXT_DATA__` but prices client-hydrated → Playwright). Vivo's suspicious R$ 1,200 lead verified REAL (V 1 Giga: 1 Gbps+600GB+10 lines+Vivo TV Completo). raw/ kept local (not committed). Daily pipeline untouched.
 - **0.7.0 — 2026-07-17** — CODE TASK #25 (Bridge numbering; distinct from the 0.5.7 in-sheet-footnote task that also carried "#25"): first historical study under a new **`analysis/`** component — the **2023–2026 promo-vs-entry time-series** (flagship campaign price as % of same-category entry-level, SP, annual + event log; **53 sourced data points** — 36 entry-price cells + 17 campaign events — no estimates, every point URL+access-dated; coverage: **controle + pós complete for all 12 carrier-years**, digital complete except TIM 2023–25 [structural — Fit only launched Jul-2026], pré 30-day 2023–25 left blank with a gap note; headline finding: **flagship promos flipped from ~100%-of-entry bonus-GB campaigns (2023–24) to real price aggression (2025–26), and the July-2026 convergence face-off has TIM Ultracombo at 69% and Vivo Total Ultra at 67% of their own entry pós — bundles priced BELOW mobile entry for the first time — while Claro Multi stays above (128% pós-based)**; the Bridge-reported "new mid-July Vivo convergent offer" could NOT be verified as a new launch — the verifiable 2026 Vivo flagship is the May–June R$100 Total Ultra promo). New **§12**; deliverables `analysis/promo_vs_entry/{promo_vs_entry.xlsx, report.md, sources.md, check.py}` (check.py green: ratios recomputed, sanity bands, source-per-point, 2026 anchors == tracker). Daily pipeline untouched. Minor bump for the new component (the task template said "0.6.0" but 0.6.x was already taken by #28–#30 — bumped to 0.7.0).
 - **0.6.1 — 2026-07-13** — CODE TASK #30 (Bridge STANDING RULE, stated verbatim: monthly-without-loyalty prices always, "including TIM Fit"): **no-loyalty-headline rule codified as Bridge decision §10.5** — already enforced in every pick (#23/#26/#28); this task closes the last silent hole: a failed Vivo "Sem fidelidade" toggle click writes LOYALTY prices as lite headlines (it happened on the 2026-07-12 snapshot — Easy Lite recorded 30/40 loyalty instead of 45/55, surfacing as spurious ±R$15 changes on 07-13). New `lite_capture_lost_toggle` detector (a lite parse where NO plan carries `loyalty_months`) + fetch now **retries the render once and warns LOUDLY** (`WARNING vivo/lite`) if the toggle capture is still missing — recording proceeds (collection > notification) but never silently. Tests 105 → 106.
 - **0.6.0 — 2026-07-13** — CODE TASKs #28 + #29 (Bridge-directed). **#28 TIM Controle Fit** (TIM's new digital line, the Vivo-Lite/Claro-Flex peer): new category **`fit`** (§6) scraped from the **controle page's `#price-fit` TEXT section** (NOT the ofertas JSON — §3 recon) via `parse_tim_fit_html`; two SP plans — **Anual 30GB 12x R$30 no cartão, 12-mo permanence** (`loyalty_months=12`, `payment_method="credit_card"`) and **Mensal 20GB R$35 sem permanência**; plan_ids = the stable etiqueta codes (`tim:TIM202600000271/270`). Digital matrix/Ranking/operator sheets gain `fit`; the Digital MINIFS adds a fit term gated on `loyalty_months` **BLANK** (criterion `"="`, COM-verified; the bake mirrors it with isna) → **Digital TIM = R$35** (the no-commitment Mensal; the loyalty Anual excluded per the #26 rule). **#29 id-rotation-resilient change detection** (root cause of the missed 2026-07-06 alert — TIM republished every Controle plan under a fresh nid while cutting prices −7.7/−15.3/−17.6%, which id-only matching read as 5 removed + 5 new → no e-mail): `_compute_changes` + `compute_price_alerts` now re-pair id-unmatched rows by **(carrier, state, category, plan_name), 1:1 unambiguous only** → real moves become `price_change` (reported under the new id) + the alert fires; same-price re-keys go silent; ambiguity keeps honest new/removed. Excel COM verified (Digital TIM R$35 live formula == bake; rotation day → one price_change row). An adversarial review caught 4 defects pre-commit (dot-decimal price mangling; unbounded modal code-search → id collision; a phantom "daily-count" safety claim → loud fetch WARNING instead; the Ranking sheet ranking the loyalty Anual against no-commitment prices → excluded from that view only). Tests 93 → **105**.
@@ -460,3 +461,48 @@ Deliverables: `analysis/promo_vs_entry/{promo_vs_entry.xlsx, report.md, sources.
 - **Going forward:** the live tracker supplies the 2026 anchors natively and can extend this series
   every year (entry prices per category are exactly what the matrix already computes daily); the §7
   promotions-view backlog item is the natural home for keeping the events log current.
+
+## 13. Convergent offers — English snapshot (2026-07) · CODE TASK #26
+
+One-shot snapshot (NOT a schedule change — the daily config is untouched) of the three carriers'
+convergent (mobile + fiber) bundles, SP, in **English**, at
+`analysis/convergent_offers/convergent_offers_2026-07.xlsx` (+ `build_workbook.py`, reproducible;
+raw captures under `analysis/convergent_offers/raw/` — **local only, not committed**, like `data/raw`).
+Sheets: TIM / Vivo / Claro (house style §7, carrier tab colors, gridlines off) + Notes & Sources.
+Unified columns: `Mobile Plan | Home Internet | Streaming | Other Benefits | Monthly Price (R$)`;
+price cells are **numeric** — TIM's `*` marker is applied via the cell **number format** (`"R$" 0.00"*"`).
+
+- **What was captured (2026-07-17):** **TIM 7 rows** (Ultracombo, launched 07-16; entry **R$ 89.99\***
+  = TIM Black Light 65GB + Ultrafibra 500 Mbps) — from TIM's published table, verified against the
+  Teletime article; **Vivo 11 combos** (entry **R$ 160** Total Pro 500 Mbps+60GB → **R$ 1,200** V 1 Giga,
+  which is REAL: 1 Gbps + 600 GB + 10 additional lines + Vivo TV Completo w/ HBO Max+Telecine; 4 of the
+  11 are TV-bundle variants); **Claro 5 combos** (entry **R$ 129.80** Fibra 350 Mbps + Controle 41GB,
+  limited-time → R$ 389.90 1 Gbps + Pós 200GB; all include Globoplay).
+- **`*` footnote CONFIRMED** (caption of TIM's own table as reproduced by Teletime, not guessed):
+  *"Ofertas disponíveis apenas em São Paulo"* = SP-state-only offer; separately, **all** TIM Ultracombo
+  prices are valid for **débito automático** payment, and offers vary by region/Ultrafibra availability.
+  TIM had **no dedicated Ultracombo page** on 07-17 (three URL probes → 404); Teletime is the source.
+- **PARSE-PATH IP — Vivo Total** (`vivo.com.br/para-voce/produtos-e-servicos/combos/vivo-total`):
+  same AEM/Akamai behavior as the §3 plan pages (httpx → 403; **Playwright renders fine**, no CAPTCHA)
+  and — the useful part — the combo grid is the **SAME `.unique-card` component**: name
+  `.unique-card__plan`, price `.total-card-price-value`, fiber speed in `.unique-card__header-benefit`,
+  full perks in the card text. SP confirmed via the "São Paulo (SP)" location label. Gotchas: two cards
+  share the display name "Vivo Família 2" (differ only by TV package — disambiguate by the bundled TV);
+  the 6-app streaming pack is an **optional PAID add-on** (R$ 55→65/mo; 80→95 on Pro; 5-app 45→55 on
+  V 1 Giga) and Amazon Prime/Apple Music/Gemini are **time-boxed courtesies** — none are in the price;
+  install "mediante fidelização". **Vivo serves session-dependent promo variants:** #25's same-day
+  capture saw "Total Essencial R$ 130 (de 160)" / "Ultra R$ 170 (de 190)" where this default headless
+  render got "Total Pro R$ 160" / "Ultra R$ 170" flat — record what renders, note the variant.
+- **PARSE-PATH IP — Claro Multi** (`claro.com.br/multi`): Next.js like §3, **but** the convergent grid
+  is a **`tab_select` component** (tabs "Fibra + Móvel" / "Fibra + TV" / "Fibra + Móvel + TV"), NOT the
+  `card_360` (this page's `card_360` holds mobile+**TV-Box** combos — a different product). Per-combo
+  **benefits/products ARE in `__NEXT_DATA__`** (`…tab_select.data.data[0].content[0].data.data[]` →
+  `products_filter.items[].name` + `detail[]` blocks) but **prices are NOT** (template placeholders +
+  catalog ids, hydrated client-side) → **Playwright render required for prices**. The full grid is
+  **public** — no CEP/address gate for the listing (SP segmentation is the default: `SEGMENTATION_DEFAULT`
+  uf=SP, cityChangedByUser=false). Gotcha: the JSON can list combos the region doesn't render (a
+  600 Mbps + Pós 50GB "ghost" combo existed in JSON only) — **trust the rendered set**.
+- **Caveats recorded in the workbook's Notes sheet:** limited-time tags (Claro's 350 Mbps combo, Vivo
+  Ultra); Vivo install/Wi-Fi conditions; courtesy windows and add-on prices; Claro's program-wide perks
+  (up to 35% bill discount, single bill, Claro Clube, Passaporte Américas 46+ countries) stated at
+  program level, not per combo; the TIM table's "Paramount" normalized to **Paramount+** per the article.
