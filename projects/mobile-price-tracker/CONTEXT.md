@@ -1,6 +1,6 @@
 # CONTEXT — Mobile Price Tracker
 
-> **Version:** 0.6.1 · **Last updated:** 2026-07-13 · Content decided by the Architect; written by Code.
+> **Version:** 0.7.0 · **Last updated:** 2026-07-17 · Content decided by the Architect; written by Code.
 > The *what / how / why* of this project and every decision behind it. This is the knowledge base and
 > IP. If someone read only this file, they should understand the project well enough to rebuild it.
 > **Standing rule (Bridge):** every CODE TASK ends by updating this file (durable knowledge) AND
@@ -377,6 +377,7 @@ Spot-checked the `comparison` sheet against the carriers' official pages + indep
 5. **NO LOYALTY HEADLINE PRICES — EVER (standing rule, 2026-07-13).** The tracked headline / entry-level price is **always the monthly price WITHOUT a loyalty/fidelity commitment** — for every carrier and category, **including TIM Fit**. Loyalty prices ("fidelidade" / "plano anual" / "prazo de permanência") are recorded only as context (`price_promo_brl` + `loyalty_months`) and are **excluded from every entry-level pick and cross-carrier ranking**. Applications: Vivo Easy Lite headline = the "Sem fidelidade" toggle price (#23/#26); TIM Fit entry = the Mensal, the Anual excluded (#28); any future loyalty-gated plan gets the same treatment. Distinct from payment method (the #27 Post decision — that's about billing rails, not commitment). Enforced fail-loud: the Vivo lite fetch detects a lost toggle capture and retries + warns (#30).
 
 ## 11. Changelog
+- **0.7.0 — 2026-07-17** — CODE TASK #25 (Bridge numbering; distinct from the 0.5.7 in-sheet-footnote task that also carried "#25"): first historical study under a new **`analysis/`** component — the **2023–2026 promo-vs-entry time-series** (flagship campaign price as % of same-category entry-level, SP, annual + event log; **53 sourced data points** — 36 entry-price cells + 17 campaign events — no estimates, every point URL+access-dated; coverage: **controle + pós complete for all 12 carrier-years**, digital complete except TIM 2023–25 [structural — Fit only launched Jul-2026], pré 30-day 2023–25 left blank with a gap note; headline finding: **flagship promos flipped from ~100%-of-entry bonus-GB campaigns (2023–24) to real price aggression (2025–26), and the July-2026 convergence face-off has TIM Ultracombo at 69% and Vivo Total Ultra at 67% of their own entry pós — bundles priced BELOW mobile entry for the first time — while Claro Multi stays above (128% pós-based)**; the Bridge-reported "new mid-July Vivo convergent offer" could NOT be verified as a new launch — the verifiable 2026 Vivo flagship is the May–June R$100 Total Ultra promo). New **§12**; deliverables `analysis/promo_vs_entry/{promo_vs_entry.xlsx, report.md, sources.md, check.py}` (check.py green: ratios recomputed, sanity bands, source-per-point, 2026 anchors == tracker). Daily pipeline untouched. Minor bump for the new component (the task template said "0.6.0" but 0.6.x was already taken by #28–#30 — bumped to 0.7.0).
 - **0.6.1 — 2026-07-13** — CODE TASK #30 (Bridge STANDING RULE, stated verbatim: monthly-without-loyalty prices always, "including TIM Fit"): **no-loyalty-headline rule codified as Bridge decision §10.5** — already enforced in every pick (#23/#26/#28); this task closes the last silent hole: a failed Vivo "Sem fidelidade" toggle click writes LOYALTY prices as lite headlines (it happened on the 2026-07-12 snapshot — Easy Lite recorded 30/40 loyalty instead of 45/55, surfacing as spurious ±R$15 changes on 07-13). New `lite_capture_lost_toggle` detector (a lite parse where NO plan carries `loyalty_months`) + fetch now **retries the render once and warns LOUDLY** (`WARNING vivo/lite`) if the toggle capture is still missing — recording proceeds (collection > notification) but never silently. Tests 105 → 106.
 - **0.6.0 — 2026-07-13** — CODE TASKs #28 + #29 (Bridge-directed). **#28 TIM Controle Fit** (TIM's new digital line, the Vivo-Lite/Claro-Flex peer): new category **`fit`** (§6) scraped from the **controle page's `#price-fit` TEXT section** (NOT the ofertas JSON — §3 recon) via `parse_tim_fit_html`; two SP plans — **Anual 30GB 12x R$30 no cartão, 12-mo permanence** (`loyalty_months=12`, `payment_method="credit_card"`) and **Mensal 20GB R$35 sem permanência**; plan_ids = the stable etiqueta codes (`tim:TIM202600000271/270`). Digital matrix/Ranking/operator sheets gain `fit`; the Digital MINIFS adds a fit term gated on `loyalty_months` **BLANK** (criterion `"="`, COM-verified; the bake mirrors it with isna) → **Digital TIM = R$35** (the no-commitment Mensal; the loyalty Anual excluded per the #26 rule). **#29 id-rotation-resilient change detection** (root cause of the missed 2026-07-06 alert — TIM republished every Controle plan under a fresh nid while cutting prices −7.7/−15.3/−17.6%, which id-only matching read as 5 removed + 5 new → no e-mail): `_compute_changes` + `compute_price_alerts` now re-pair id-unmatched rows by **(carrier, state, category, plan_name), 1:1 unambiguous only** → real moves become `price_change` (reported under the new id) + the alert fires; same-price re-keys go silent; ambiguity keeps honest new/removed. Excel COM verified (Digital TIM R$35 live formula == bake; rotation day → one price_change row). An adversarial review caught 4 defects pre-commit (dot-decimal price mangling; unbounded modal code-search → id collision; a phantom "daily-count" safety claim → loud fetch WARNING instead; the Ranking sheet ranking the loyalty Anual against no-commitment prices → excluded from that view only). Tests 93 → **105**.
 - **0.5.9 — 2026-07-03** — CODE TASK #27 (Bridge REVERSAL of #24's Post pick): the matrix **Post column tracks the plain CHEAPEST postpaid plan again — credit-card-only INCLUDED** — so for TIM it reads the **R$119,99** "A Express" (no cartão) plan; the Bridge wants to *watch that price* and be told when it moves (the `changes` sheet + the #15 daily ≥3% alert track its `plan_id`, tim:55121). `excel_writer` only: the Post `MINIFS` dropped the `"<>credit_card"` criterion and `_matrix_value` its mirror filter (bake == formula re-verified via Excel COM recalc — Post TIM R$119,99 on all rows, Digital Vivo R$45 and everything else unchanged). **The `payment_method` TAG is fully retained** (schema §6 + `tim.py` tagging + history) — billing type stays visible per plan; only the entry-level pick stopped excluding it. Comparison-sheet footnote rewritten: entry-level = the cheapest plan R$119,99, flagged CREDIT-CARD-only, with the R$129,99 bill plan noted as context. Tests 94 → 93 (three exclusion tests → two cheapest-pick tests; note test rewritten). Historical rows are already 119,99 (pre-#24) or become 119,99 on the next regeneration (the matrix recomputes from history each run).
@@ -412,3 +413,50 @@ Spot-checked the `comparison` sheet against the carriers' official pages + indep
 - **0.2.1 — 2026-06-11** — Code added §5 "Verified execution environment" after CODE TASK #2: Windows 11 / Python 3.13.13 machine verified, `PYTHONPATH=src` run quirk + `pip install -e .` TODO, demo-data-is-not-real-prices clarification, pending `workflow`-scope auth for the Actions file.
 - **0.2.0 — 2026-06-11** — Bridge resolved all four open questions (§10): interim function-sheets with per-carrier + dashboard layout deferred to backlog; **full-detail** capture (expand modals → Playwright-favored); **rclone-in-Actions** chosen for the Drive mirror; keep all history. Recorded interaction/runtime implications in §8.
 - **0.1.0 — 2026-06-11** — Project defined; reconnaissance on all three carrier stacks; architecture, schema, Excel layout, decisions, risks, and glossary recorded.
+
+## 12. Historical analysis — promo vs entry-level (2023–2026) · CODE TASK #25
+
+First study under the **`analysis/`** component (self-contained; the daily pipeline is untouched).
+Deliverables: `analysis/promo_vs_entry/{promo_vs_entry.xlsx, report.md, sources.md, check.py}`.
+
+- **Metric:** `ratio_pct = flagship_promo_price ÷ entry_level_price(same category, carrier, year) × 100`.
+  Categories: pré (30-day), controle, pós, digital, combo/convergent. **Anchor rule:** a campaign is
+  classified from how its source describes it; convergent combos anchor to entry **pós** (mobile
+  component is pós-grade) unless explicitly controle-based (Claro's combos are) — `anchor_category`
+  recorded per row. **Flagship rule:** per carrier-year, the campaign pushed hardest / most
+  press-covered, pick justified in one line in the `annual` sheet. **Coverage rule (Bridge):**
+  2023–2026 target; an unsourceable cell stays visibly blank with a gap note — never estimated,
+  never interpolated.
+- **Source strategy:** every data point carries URL + access date (37 sources, S01–S37). Wayback
+  snapshots of carrier pages parse cleanly for **TIM** (server-rendered Drupal `ofertas` JSON — except
+  early-2023, priceless JSON → visible-HTML fallback) and **Claro** (`__NEXT_DATA__` priceData /
+  card_360 grids — beware a stale static card block that contradicts press-verified portfolios in
+  2023/2024; discarded). **Vivo archives are useless** (AEM/JS 403 shells — recon §3 confirmed) →
+  Vivo history rests on press tables (Tecnoblog/Minha Operadora annual-reajuste articles are gold:
+  full before/after price tables every Feb–Mar) and archived **aggregator** pages (melhorplano.net,
+  SP results; also used for the one TIM-pós-2025 hole). Trade press (Teletime, Minha Operadora,
+  Tecnoblog) covers campaigns densely enough that every carrier-year 2023–2026 got a flagship.
+- **Results (annual ratio of flagship promo to entry, SP):** TIM 101.9 → 103.8 → 71.2 → **69.2%**;
+  Vivo 100.0 → 63.6 → 71.4 → **66.7%**; Claro 300.4 → 120.0 → 83.3 → **236.4%** (Claro's flagships
+  alternate site flash offers and convergent combos — anchor visible per row). Entry lists only rose
+  (pós +23–25% over the window) while promo prices fell — **promos drifted down-market from
+  bonus-GB-at-list (≈100%, 2023–24) to real cuts (59–84%, 2025–26)**.
+- **2026 convergence face-off:** TIM **Ultracombo** (2026-07-16, R$89.99 entry = **69%** of entry pós
+  129.99) vs Vivo **Total Ultra R$100** (May–Jun promo = **67%** of 150; live site 2026-07-17:
+  Essencial R$130 "de 160") vs **Claro Multi** (pós-based 159.90 = **128%** of 124.90; its
+  limited-time entry combo is controle-based at 129.80 = 236% of 54.90). TIM+Vivo now price
+  fibra+mobile bundles BELOW their own mobile-only entry pós — a first in the series; Claro, the
+  2023 convergence pioneer (Multi Week), keeps combos above entry ("more-for-more"). The
+  Bridge-reported "new mid-July Vivo convergent launch" was NOT found in any reputable source
+  (what exists: the live limited-time Vivo Total repricing + a Jul-14 fiber-only 1-Giga cut).
+- **Caveats:** point-in-time annual sampling (intra-year swings in notes); TIM 2023–25 fatura
+  headlines carry a 12-mo permanência condition (recorded, noted); TIM controle was cut −15% on
+  2026-07-06 *after* the audited 2026-07-01 anchor (noted, not re-anchored); pré 30-day 2023–25
+  blank (deriving true 30-day validity from dead pages risks repeating the #18 max-"N dias" bug).
+- **Verification:** `check.py` (standalone or pytest) re-reads the xlsx and asserts: every ratio
+  recomputes from its two inputs; sanity bands (controle R$35–80, pós R$80–200, ratio 40–400%);
+  every non-blank point resolves to a `sources` row; **2026 anchors == the tracker's audited values**
+  (controle 58.99/59/54.90-eff; pós 129.99-bill/150/124.90). All green 2026-07-17.
+- **Going forward:** the live tracker supplies the 2026 anchors natively and can extend this series
+  every year (entry prices per category are exactly what the matrix already computes daily); the §7
+  promotions-view backlog item is the natural home for keeping the events log current.
