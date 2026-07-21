@@ -1,5 +1,10 @@
 # WORKFLOW — the operating loop
 
+> ⚠️ **SUPERSEDED by [RULEBOOK.md](RULEBOOK.md) (Rulebook v1.2.0).**
+> The current operating loop is defined by the rulebook's **CONNECTIVITY** (typed handoffs
+> between Architect / Design / Code / Bridge) and **HANDOFF FORMAT** sections. Where the two
+> disagree, **RULEBOOK.md wins**. Kept for history.
+
 > **Version:** 1.0.0 · **Last updated:** 2026-06-11
 > How work actually moves through the three roles. Read with `INSTRUCTIONS.md` (roles & rules) and
 > `GOVERNANCE.md` (what needs approval).

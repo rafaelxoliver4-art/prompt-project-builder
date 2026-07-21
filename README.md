@@ -11,9 +11,10 @@ This repo is a **monorepo**: shared operating rules at the root, one self-contai
 ## Read these first
 | File | What it's for |
 |------|----------------|
-| [`INSTRUCTIONS.md`](INSTRUCTIONS.md) | The Architect's operating playbook (self-updating). |
-| [`GOVERNANCE.md`](GOVERNANCE.md) | What's allowed, what needs your approval, security & legal rules. |
-| [`WORKFLOW.md`](WORKFLOW.md) | The Architect ↔ Bridge ↔ Implementer loop + copy-paste templates. |
+| [`RULEBOOK.md`](RULEBOOK.md) | **Authoritative.** The shared rulebook (v1.2.0) — roles, connectivity, prime directives, governance, project isolation. Mirrors the live claude.ai instructions box. |
+| [`INSTRUCTIONS.md`](INSTRUCTIONS.md) | ⚠️ Superseded by `RULEBOOK.md`. The former Architect playbook, kept for history. |
+| [`GOVERNANCE.md`](GOVERNANCE.md) | ⚠️ Superseded by `RULEBOOK.md`. Former approval / security / legal rules, kept for history. |
+| [`WORKFLOW.md`](WORKFLOW.md) | ⚠️ Superseded by `RULEBOOK.md`. Former operating loop + templates, kept for history. |
 
 ## Projects
 | Project | Status | Description |

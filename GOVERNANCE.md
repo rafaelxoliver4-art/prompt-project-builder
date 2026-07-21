@@ -1,5 +1,10 @@
 # GOVERNANCE
 
+> ⚠️ **SUPERSEDED by [RULEBOOK.md](RULEBOOK.md) (Rulebook v1.2.0).**
+> The current approval rules are the rulebook's **GOVERNANCE** section (what Code may do alone,
+> what needs an explicit YES, what is never allowed) together with **PROJECT ISOLATION**. Where
+> the two disagree, **RULEBOOK.md wins**. Kept for history.
+
 > **Version:** 1.0.0 · **Last updated:** 2026-06-11
 > Rules that bind both the Architect (chat) and the Implementer (Code). The **Bridge (user)** is the
 > only party who can approve items in the matrix below. These rules exist to prevent irreversible

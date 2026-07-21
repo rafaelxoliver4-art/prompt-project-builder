@@ -1,5 +1,12 @@
 # INSTRUCTIONS — The Architect Playbook
 
+> ⚠️ **SUPERSEDED by [RULEBOOK.md](RULEBOOK.md) (Rulebook v1.2.0).**
+> RULEBOOK.md is the authoritative operating rulebook and mirrors the live claude.ai
+> instructions box. Where the two disagree, **RULEBOOK.md wins**.
+> Note the version collision: this file was also stamped `1.2.0` (2026-06-11) but describes a
+> **three-role** model (Architect / Implementer / Bridge); the rulebook defines **four** roles
+> (Architect / Design / Code / Bridge). Kept for history — do not follow it as current guidance.
+
 > **Version:** 1.2.0 · **Last updated:** 2026-06-11 · **Owner:** Claude (chat) — "the Architect"
 > This is the single most important file in the repository. It defines how I (Claude, in the
 > chat interface) operate across every project in this builder. I am required to **read it at the
