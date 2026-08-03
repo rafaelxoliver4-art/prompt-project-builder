@@ -1,6 +1,6 @@
 # CONTEXT — Mobile Price Tracker
 
-> **Version:** 0.8.0 · **Last updated:** 2026-08-03 · Content decided by the Architect; written by Code.
+> **Version:** 0.8.1 · **Last updated:** 2026-08-03 · Content decided by the Architect; written by Code.
 > The *what / how / why* of this project and every decision behind it. This is the knowledge base and
 > IP. If someone read only this file, they should understand the project well enough to rebuild it.
 > **Standing rule (Bridge):** every CODE TASK ends by updating this file (durable knowledge) AND
@@ -378,6 +378,7 @@ Spot-checked the `comparison` sheet against the carriers' official pages + indep
 5. **NO LOYALTY HEADLINE PRICES — EVER (standing rule, 2026-07-13).** The tracked headline / entry-level price is **always the monthly price WITHOUT a loyalty/fidelity commitment** — for every carrier and category, **including TIM Fit**. Loyalty prices ("fidelidade" / "plano anual" / "prazo de permanência") are recorded only as context (`price_promo_brl` + `loyalty_months`) and are **excluded from every entry-level pick and cross-carrier ranking**. Applications: Vivo Easy Lite headline = the "Sem fidelidade" toggle price (#23/#26); TIM Fit entry = the Mensal, the Anual excluded (#28); any future loyalty-gated plan gets the same treatment. Distinct from payment method (the #27 Post decision — that's about billing rails, not commitment). Enforced fail-loud: the Vivo lite fetch detects a lost toggle capture and retries + warns (#30).
 
 ## 11. Changelog
+- **0.8.1 — 2026-08-03** — CODE TASK #32 (convergent **phase 2**): the remaining two carriers, both live. **Vivo Total** (`adapters/vivo_convergent.py`, Playwright — httpx is 403 behind Cloudflare): **11 SP combos R$160 → R$1 200**, 5 with TV, incl. the real V 1 Giga (1 Gbps + 600 GB + 11 lines + TV Completo). Traps handled: the **`VIV` code is NOT unique** (2 collisions across 11 cards) → `offer_id` = code + the card's own **sorted `productsIds`** composition (carrier-native, never price-derived, collision-proof, with a slug/position fallback so no card is dropped); **lazy render** → bounded scroll until the card count stops growing; the **paid apps add-on that hides the price element** → fall back to `data-original-price` and record the base price with a note (never base+add-on, never a dropped offer); struck-through prices become the promo, and **no session variant appeared this run** (all 11 flat, matching 07-17). **Claro Multi** (`adapters/claro_convergent.py`, **no browser**): `__NEXT_DATA__` `tab_select` grid (located **by component name** — a `card_360` of another product line sits on the same page) + **ONE batched** public `GET /api/catalog?state=SP&city=sao_paulo&uuids=…`; **10 live combos R$129,80 → R$459,80**, **5 ghosts** (`catalog.notFound` — listed by the CMS, not sold in SP) excluded; price = Σ(`precoCombo` **if the key is present** else `preco`) in integer centavos — the key is *absent* on `internet` for every Fibra+TV card, so a falsy-default read would under-price those by up to R$179,90; fields from `catalog.nomeAutomatico` (CMS names are stale) and speed from `recursosDescritivos["602"]`; SP is an **explicit request parameter**, not a geolocated guess. Both activated in `convergent:`; the #31 guards re-verified with **three** targets (a test proves one source exploding still lets the other two + the mobile write complete). Live end-to-end: **24 offers** (TIM 3 / Vivo 11 / Claro 10) with the mobile history (2 336 rows / 42 snapshots) untouched. Tests 120 → **132**.
 - **0.8.0 — 2026-08-03** — CODE TASK #31 (Bridge numbering "#26"; that number was already used twice in this repo — see the 0.5.8 and 0.7.1 entries — so this ships as **#31**): **CONVERGENT OFFERS become a tracked domain (phase 1)** — new **§14**. Live investigation of all three SP combo pages: **all DISCRETE priced tiers, none a configurator**; two §13 facts corrected — TIM's Ultracombo page now **exists** (httpx 200; it 404'd on 07-17) and Claro Multi's prices are now reachable **without a browser** (`__NEXT_DATA__` grid + one public `/api/catalog` call); Vivo Total still needs Playwright (Cloudflare now, not Akamai). New **separate** schema `ConvergentOffer`/`CONVERGENT_COLUMNS` (`convergent.py`) — `offer_id` carrier-native & never price-derived, derived `services` summary, `is_valid()` demands ≥2 bundled services, `payment_method` for the billing rail. New **`convergent_history`** sheet: append-only, same per-date idempotency as the mobile history, flat (no formulas/bake/charts) — and **always re-read + re-emitted**, because `write_workbook` rebuilds the file and would otherwise DESTROY it on any run that collected nothing. First scraper: **TIM Ultracombo** (`adapters/tim_convergent.py`, plain httpx) — live-verified 3 SP combos **R$ 89,99 / 139,99 / 169,99** (500M+65GB / 1G+70GB / 1G+115GB, one line each, no TV), ids = native nids. Built around three verified traps: the **ghost price fields** (`field_preco_adicional_*`, identical on all tiers — the mobile adapter treats that field as a real struck-through price, so reusing it would fake a promo on every combo), **`langcode` lying "rj"** for SP-only offers (gate on `field_regioes`), and streaming living in **icon media names**. Wired into the daily job **GUARDED at two layers** (per-target in `main.run()` + around the merge/sheet-write inside `write_workbook`) so no convergent failure can block the mobile scrape, write or commit; `--demo` skips it. Config gains a **`convergent:`** section (TIM active; Vivo/Claro staged for phase 2). Mobile pipeline untouched — matrix, formulas, #21 bake, charts, alerts, idempotency all verified unchanged. Tests 106 → **119**.
 - **0.7.1 — 2026-07-17** — CODE TASK #26 (Bridge numbering; the repo's earlier "#26" was the 0.5.8 Vivo-Lite metric task): convergent-offers English snapshot — `analysis/convergent_offers/convergent_offers_2026-07.xlsx` (TIM Ultracombo 7 rows from TIM's published table verified vs Teletime, **Vivo Total 11 combos + Claro Multi 5 combos scraped live**, SP; unified 5-column English format incl. "Other Benefits"; every row sourced; prices numeric with TIM's `*` applied via number format). Entry face-off as verified: **TIM R$ 89.99\*** (65GB+500 Mbps, SP-only, débito automático) vs **Claro R$ 129.80** (Controle 41GB+350 Mbps, limited-time — the recon lead's R$ 159.90 is the "Melhor escolha" mid-tier, not the entry) vs **Vivo R$ 160** (Total Pro 60GB+500 Mbps). The `*` footnote CONFIRMED from TIM's table caption via Teletime: "Ofertas disponíveis apenas em São Paulo" + all TIM prices are débito-automático prices. New **§13** with the two pages' parse paths (Vivo Total = same Playwright+`.unique-card` IP as §3; Claro Multi = `tab_select` grid, benefits in `__NEXT_DATA__` but prices client-hydrated → Playwright). Vivo's suspicious R$ 1,200 lead verified REAL (V 1 Giga: 1 Gbps+600GB+10 lines+Vivo TV Completo). raw/ kept local (not committed). Daily pipeline untouched.
 - **0.7.0 — 2026-07-17** — CODE TASK #25 (Bridge numbering; distinct from the 0.5.7 in-sheet-footnote task that also carried "#25"): first historical study under a new **`analysis/`** component — the **2023–2026 promo-vs-entry time-series** (flagship campaign price as % of same-category entry-level, SP, annual + event log; **53 sourced data points** — 36 entry-price cells + 17 campaign events — no estimates, every point URL+access-dated; coverage: **controle + pós complete for all 12 carrier-years**, digital complete except TIM 2023–25 [structural — Fit only launched Jul-2026], pré 30-day 2023–25 left blank with a gap note; headline finding: **flagship promos flipped from ~100%-of-entry bonus-GB campaigns (2023–24) to real price aggression (2025–26), and the July-2026 convergence face-off has TIM Ultracombo at 69% and Vivo Total Ultra at 67% of their own entry pós — bundles priced BELOW mobile entry for the first time — while Claro Multi stays above (128% pós-based)**; the Bridge-reported "new mid-July Vivo convergent offer" could NOT be verified as a new launch — the verifiable 2026 Vivo flagship is the May–June R$100 Total Ultra promo). New **§12**; deliverables `analysis/promo_vs_entry/{promo_vs_entry.xlsx, report.md, sources.md, check.py}` (check.py green: ratios recomputed, sanity bands, source-per-point, 2026 anchors == tracker). Daily pipeline untouched. Minor bump for the new component (the task template said "0.6.0" but 0.6.x was already taken by #28–#30 — bumped to 0.7.0).
@@ -542,9 +543,9 @@ streaming · extra_benefits · data_note · source_url · raw_ref`
 
 | Source | Tech | Access path | Status |
 |---|---|---|---|
-| **TIM Ultracombo** `/sp/internet/tim-ultracombo` | **plain httpx 200** (Drupal, no browser) | `drupal-settings-json` → `settings["ofertas"]` | ✅ **IMPLEMENTED** |
-| **Vivo Total** `/combos/vivo-total` | httpx **403 (Cloudflare)** → Playwright | the same `.unique-card` grid as the mobile pages | phase 2 |
-| **Claro Multi** `/multi` | **httpx now sufficient** (2-step) | `__NEXT_DATA__` `tab_select` for the grid + ONE public `GET /api/catalog?state=SP&city=sao_paulo&uuids=…` for prices | phase 2 |
+| **TIM Ultracombo** `/sp/internet/tim-ultracombo` | **plain httpx 200** (Drupal, no browser) | `drupal-settings-json` → `settings["ofertas"]` | ✅ **LIVE** (#31) |
+| **Vivo Total** `/combos/vivo-total` | httpx **403 (Cloudflare)** → Playwright | the same `.unique-card` grid as the mobile pages | ✅ **LIVE** (#32) |
+| **Claro Multi** `/multi` | **httpx now sufficient** (2-step) | `__NEXT_DATA__` `tab_select` for the grid + ONE public `GET /api/catalog?state=SP&city=sao_paulo&uuids=…` for prices | ✅ **LIVE** (#32) |
 
 Two §13 facts are now **stale and corrected**: TIM's Ultracombo page **exists** (it 404'd on 07-17, so
 #26 had to source the tiers from a Teletime article), and Claro's prices **no longer require a browser**
@@ -595,5 +596,75 @@ failing the mobile write). `--demo` skips the convergent pass entirely (it is th
 Sources live in `config/sources.yaml` under **`convergent:`** (`active:` per carrier + an `adapter:`
 name resolved through `CONVERGENT_ADAPTERS`) — only TIM is active in phase 1.
 
-**Next (phase 2):** the Vivo Total (Playwright) and Claro Multi (httpx + catalog API) adapters, then a
-convergent comparison sheet. Both parse paths are documented above and in §13.
+### Vivo Total — the implemented adapter (`adapters/vivo_convergent.py`, #32)
+Playwright (httpx is 403 behind **Cloudflare**), same `.unique-card` component as the mobile pages.
+**11 combos on 2026-08-03**, R$160 → R$1,200; **5 carry TV**:
+
+| R$/mo | offer | fibre | mobile | lines | TV |
+|---|---|---|---|---|---|
+| 160 | Total Pro | 500 Mbps | 60 GB | 1 | — |
+| 170 | Total Ultra | 700 Mbps | 70 GB | 1 | — |
+| 190 | Total Ultra + TV online | 700 Mbps | 70 GB | 1 | 80 canais Estendido |
+| 270 / 330 / 420 / 520 | Total Família 2–5 | 700 Mbps | 120/180/240/300 GB | 2/3/4/5 | — |
+| 290 | Total Ultra + TV | 700 Mbps | 70 GB | 1 | 120 canais Avançado |
+| 290 / 390 | Família 2 (two TV variants) | 700 Mbps | 120 GB | 2 | 80 / 120 canais |
+| **1 200** | **Total V 1 Giga** | 1 Gbps | 600 GB | **11** | TV Completo + HBO Max/Telecine |
+
+- ⚠️ **`offer_id` — the `VIV` code is NOT unique.** 11 cards carried only 9 distinct codes: Ultra
+  (R$170) / Ultra + TV online (R$190) share `VIV202604028853`, and Total Família 2 (R$270) /
+  Família 2 (R$290) share `VIV202604028085`. The id is therefore the **code + the card's own
+  `productsIds` composition** (from `data-external-link-url`, **sorted** so a re-ordered but identical
+  bundle keeps one id): `vivo:VIV202604028853-305-313-408-…` vs `…-305-313-336-408-…` (token `336` =
+  the TV product). Carrier-native, never price-derived, unique across every observed card. A
+  defensive pass appends the name slug then the DOM position if a collision ever survives, so **no
+  card is silently dropped**. Use `data-external-link-url`, not the visible CTA `href` (some are stale).
+- ⚠️ **Lazy render:** cards below the fold are absent until scrolled — `_scroll_all` wheels down until
+  the card count stops growing (bounded). A no-scroll capture silently yields a SHORT list.
+- ⚠️ **Hidden price:** the optional "6 apps por R$55/mês" toggle `v-show`s the price element away (or
+  shows base+add-on). We never click it; if the text is unusable we fall back to `data-original-price`,
+  and if the displayed value differs from the base we record the base and say so in `price_note`. The
+  add-on is **never** part of the price. Also: `.unique-card__price` holds an unrendered Vue mustache
+  (`Valor R$ {{ total }} 170 /mês`) — the price must come from `.total-card-price-value`.
+- **Session variants:** a struck-through `.unique-card__price-old` becomes the headline with the
+  displayed price as the promo. **On 2026-08-03 no variant appeared** — all 11 cards were flat
+  (`price-old` empty, `data-original-price` == displayed), matching the 07-17 set, so the "Essencial
+  R$130 (de 160)" variant §14 recorded was NOT served. The adapter never hard-codes the card count.
+- SP asserted positively from the page's own bar (`São Paulo (SP)`); a mismatch warns loudly.
+- Loyalty: "instalação grátis mediante fidelização" applies to the INSTALL, not the monthly price →
+  `loyalty_months` stays None (CONTEXT §10.5) and the condition is kept in the note.
+
+### Claro Multi — the implemented adapter (`adapters/claro_convergent.py`, #32)
+**No browser**: two plain public GETs. **10 live combos on 2026-08-03** (R$129,80 → R$459,80) across
+three tabs (Fibra + Móvel / Fibra + TV / Fibra + Móvel + TV); entry = 350 Mbps + Controle 40GB.
+
+- **Grid** — `__NEXT_DATA__` → the component whose `component == "tab_select"` (**found by name, never
+  by index**: the page also carries a `card_360` of a different product line); each card's `_uid`
+  (Storyblok UUID) is the `offer_id` — native, stable across price edits, never price-derived.
+- **Prices** — ONE batched `GET /api/catalog?state=SP&city=sao_paulo&environment=public&component=card_360&uuids=<all>`
+  (the page itself only asks for the active tab; batching keeps us to a single polite call).
+  **price = Σ over slots of (`precoCombo` if the KEY IS PRESENT else `preco`), integer centavos.**
+  ⚠️ `precoCombo` is **absent (not null)** on `internet` for every Fibra+TV card — a falsy-default read
+  would drop the fibre component and under-price those three combos by R$99,90–179,90.
+- ⚠️ **Ghosts excluded:** 5 of the 15 CMS cards come back `catalog: {"notFound": true}` — listed but
+  not sold in SP. They have no price at all; the rendered/priced set is the truth.
+- **Names/fields from `catalog.<slot>.nomeAutomatico`, not the CMS text** (which is stale: "Controle
+  41GB" where the priced product is 40GB). Speed from `recursosDescritivos["602"]` ("350 Mbps").
+- **SP is an explicit input** (`state=SP&city=sao_paulo`) — stronger than the geolocated default the
+  mobile Claro adapter relies on; the segmentation cannot drift with the egress IP. The city slug is
+  config-driven (`convergent.claro.api_city`) with a state→city fallback map.
+- `acrescimoNaoDCC` (R$5 on the Controle 40GB entry tier, 0 elsewhere) = a surcharge for NOT paying by
+  débito em conta → `payment_method="debit_auto"` + the surcharge in `price_note`. A billing rail, not
+  a loyalty commitment.
+
+### Three-target guarded wiring (#32)
+All three sources are `active: true` in `convergent:`. The guards from #31 are unchanged and verified
+with three targets: **per-target** `try/except` in `main.run()` (a failing carrier is logged and
+skipped while the others still collect), **plus** `try/except` around the convergent merge and sheet
+write inside `write_workbook`, **plus** the always-read-and-re-emit of `convergent_history`. A test
+proves one source exploding still lets the other two and the mobile write complete.
+
+**Live end-to-end 2026-08-03: 24 offers** — TIM 3 (R$89,99–169,99) · Vivo 11 (R$160–1 200) ·
+Claro 10 (R$129,80–459,80), with the mobile history (2 336 rows / 42 snapshots) untouched.
+
+**Next (phase 3):** a convergent comparison sheet (entry-level combo per carrier over time, the
+`comparison`-style view for combos).

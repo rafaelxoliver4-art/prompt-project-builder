@@ -138,7 +138,7 @@ convergent:
     url: https://www.tim.com.br/{state}/internet/tim-ultracombo
   vivo:
     display_name: Vivo Total
-    active: false            # phase 2 — needs the Playwright render path
+    active: true             # #32 — Playwright render (httpx is 403 behind Cloudflare)
     adapter: vivo_total
     state_in_url: false
     category: total
@@ -146,9 +146,11 @@ convergent:
     url: https://vivo.com.br/para-voce/produtos-e-servicos/combos/vivo-total
   claro:
     display_name: Claro Multi
-    active: false            # phase 2 — needs the two-step catalog price call
+    active: true             # #32 — httpx page + ONE batched /api/catalog call for prices
     adapter: claro_multi
     state_in_url: false
     category: multi
     label: Claro Multi (fibra + móvel [+ TV])
     url: https://www.claro.com.br/multi
+    # the catalog call takes the city as an explicit slug; unset → derived from the active state
+    api_city: sao_paulo
