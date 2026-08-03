@@ -1,0 +1,120 @@
+"""Canonical data model for a CONVERGENT (combo) offer — a bundle of mobile + fixed broadband
+(+ TV / landline) sold as one monthly price.
+
+This is a SEPARATE domain from the mobile `Plan` (models.py): a combo is structurally different
+(it bundles several services, carries a fiber speed and a line count, and its "tier" is the bundle,
+not a single plan). Keeping it in its own dataclass/sheet means the mobile pipeline — schema,
+daily matrix, cached-value bake, charts, alerts — is completely untouched by convergent work.
+
+One `ConvergentOffer` == one combo offer, as seen in one daily snapshot, for one state.
+The Excel `convergent_history` columns derive from `CONVERGENT_COLUMNS`. See CONTEXT §14.
+"""
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+from datetime import datetime
+from typing import Optional
+
+# Column order for the `convergent_history` sheet (and the contract every convergent adapter fills).
+CONVERGENT_COLUMNS: list[str] = [
+    "snapshot_date",
+    "snapshot_ts",
+    "carrier",
+    "state",
+    "offer_name",
+    "offer_id",
+    "price_brl",
+    "price_promo_brl",
+    "loyalty_months",
+    "payment_method",
+    "price_note",
+    "services",
+    "has_mobile",
+    "has_broadband",
+    "has_tv",
+    "has_landline",
+    "broadband_speed_mbps",
+    "mobile_gb",
+    "mobile_lines",
+    "tv_tier",
+    "streaming",
+    "extra_benefits",
+    "data_note",
+    "source_url",
+    "raw_ref",
+]
+
+VALID_CARRIERS = {"vivo", "claro", "tim"}
+# Canonical service tokens, in the order they appear in the `services` summary string.
+SERVICE_ORDER = ["mobile", "broadband", "tv", "landline"]
+
+
+@dataclass
+class ConvergentOffer:
+    carrier: str
+    state: str
+    offer_name: str
+    # Stable, carrier-native (or deterministically derived) id — unique within a carrier and NEVER
+    # price-derived, so a price change is seen as a change to the SAME offer rather than a new one
+    # (the same rule as the mobile `plan_id`, CONTEXT §4).
+    offer_id: Optional[str] = None
+    # Headline monthly price. Standing Bridge rule (CONTEXT §10.5): this is the price WITHOUT a
+    # loyalty/fidelity commitment whenever the carrier distinguishes them; a commitment price goes
+    # to `price_promo_brl` with `loyalty_months` set.
+    price_brl: Optional[float] = None
+    price_promo_brl: Optional[float] = None
+    loyalty_months: Optional[int] = None
+    # Billing rail the headline price assumes: "debit_auto" | "bill" | None. Carriers price combos on a
+    # payment ladder (TIM Ultracombo advertises the débito-automático figure, with a higher "fatura"
+    # price in the modal) — the same dimension as the mobile `payment_method` (#24), and distinct from
+    # loyalty (CONTEXT §10.5): it is context, never a reason to prefer a commitment price.
+    payment_method: Optional[str] = None
+    price_note: Optional[str] = None
+    # What the bundle actually contains.
+    has_mobile: bool = False
+    has_broadband: bool = False
+    has_tv: bool = False
+    has_landline: bool = False
+    broadband_speed_mbps: Optional[int] = None
+    mobile_gb: Optional[float] = None
+    mobile_lines: Optional[int] = None
+    tv_tier: Optional[str] = None
+    streaming: Optional[str] = None
+    extra_benefits: Optional[str] = None
+    data_note: Optional[str] = None
+    source_url: Optional[str] = None
+    raw_ref: Optional[str] = None
+    # Stamped at write time (kept last so adapters don't have to set them).
+    snapshot_date: Optional[str] = None
+    snapshot_ts: Optional[str] = None
+
+    @property
+    def services(self) -> str:
+        """Canonical '+'-joined summary of the bundled services, e.g. "mobile+broadband+tv".
+        Derived from the flags so the sheet is readable and groupable without extra parsing."""
+        flags = {"mobile": self.has_mobile, "broadband": self.has_broadband,
+                 "tv": self.has_tv, "landline": self.has_landline}
+        return "+".join(s for s in SERVICE_ORDER if flags[s])
+
+    def is_valid(self) -> bool:
+        """Minimum bar for a usable row: a real carrier, a state, a name, a price, and — the point
+        of a CONVERGENT offer — at least TWO bundled services (a single-service offer is a plain
+        plan and belongs in the mobile pipeline, not here)."""
+        n_services = sum((self.has_mobile, self.has_broadband, self.has_tv, self.has_landline))
+        return bool(
+            self.carrier in VALID_CARRIERS
+            and self.state
+            and self.offer_name
+            and self.price_brl is not None
+            and n_services >= 2
+        )
+
+    def stamp(self, when: datetime) -> "ConvergentOffer":
+        self.snapshot_date = when.date().isoformat()
+        self.snapshot_ts = when.isoformat(timespec="seconds")
+        return self
+
+    def as_row(self) -> dict:
+        d = asdict(self)
+        d["services"] = self.services          # a property, so not in asdict()
+        return {col: d.get(col) for col in CONVERGENT_COLUMNS}

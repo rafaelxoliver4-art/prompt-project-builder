@@ -112,3 +112,43 @@ carriers:
       fit:
         label: TIM Fit (digital)
         url: https://www.tim.com.br/{state}/para-voce/planos/controle
+
+# ---------------------------------------------------------------------------------------------
+# CONVERGENT (combo) offers — a SEPARATE data domain (#31, CONTEXT §14): bundles of mobile + fixed
+# broadband (+ TV / landline) sold at one monthly price. Written to the `convergent_history` sheet;
+# the mobile pipeline above is completely unaffected. The daily job scrapes these AFTER the mobile
+# scrape, fully GUARDED — any convergent failure is logged and skipped, never blocking mobile.
+#
+# `adapter` names the convergent adapter to use (registry: adapters/__init__.py CONVERGENT_ADAPTERS).
+# Only carriers listed here with `active: true` are scraped.
+#
+# Investigation 2026-08-03 (CONTEXT §14) — all three pages are DISCRETE priced tiers, not
+# "monte seu combo" configurators:
+#   * TIM Ultracombo  — plain httpx (Drupal settings JSON). IMPLEMENTED (phase 1).
+#   * Vivo Total      — Playwright required (Cloudflare 403 on httpx); `.unique-card` grid. PHASE 2.
+#   * Claro Multi     — httpx page + one public /api/catalog call for prices. PHASE 2.
+convergent:
+  tim:
+    display_name: TIM Ultracombo
+    active: true
+    adapter: tim_ultracombo
+    state_in_url: true
+    category: ultracombo
+    label: TIM Ultracombo (fibra + móvel)
+    url: https://www.tim.com.br/{state}/internet/tim-ultracombo
+  vivo:
+    display_name: Vivo Total
+    active: false            # phase 2 — needs the Playwright render path
+    adapter: vivo_total
+    state_in_url: false
+    category: total
+    label: Vivo Total (fibra + móvel)
+    url: https://vivo.com.br/para-voce/produtos-e-servicos/combos/vivo-total
+  claro:
+    display_name: Claro Multi
+    active: false            # phase 2 — needs the two-step catalog price call
+    adapter: claro_multi
+    state_in_url: false
+    category: multi
+    label: Claro Multi (fibra + móvel [+ TV])
+    url: https://www.claro.com.br/multi

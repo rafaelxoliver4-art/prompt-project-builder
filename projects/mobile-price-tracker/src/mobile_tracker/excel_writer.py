@@ -28,6 +28,7 @@ from openpyxl.formatting.rule import ColorScaleRule, FormulaRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+from .convergent import CONVERGENT_COLUMNS
 from .models import COLUMNS
 
 FONT = "Arial"
@@ -60,6 +61,7 @@ TAB_COLORS = {
     "Vivo": "660099", "Claro": "DA291C", "TIM": "0033A0",
     "comparison": "2E7D32", "Charts": "43A047", "Ranking": "1565C0", "summary": "102A43",
     "history": "8A8A8A", "latest": "8A8A8A", "changes": "8A8A8A",
+    "convergent_history": "6A1B9A",     # convergent/combo domain (#31) — distinct from the mobile sheets
 }
 
 
@@ -148,6 +150,36 @@ def _rotation_pairs(cur, old, new_keys, gone_keys) -> dict:
     news, olds = by_name(cur, new_keys), by_name(old, gone_keys)
     return {ks[0]: olds[nk][0] for nk, ks in news.items()
             if len(ks) == 1 and len(olds.get(nk, [])) == 1}
+
+
+def _merge_convergent(existing: pd.DataFrame, fresh: pd.DataFrame) -> pd.DataFrame:
+    """Append-only merge for `convergent_history` (#31) — the same contract as `_merge_history`:
+    a re-run of a snapshot_date REPLACES that date's rows (idempotent per date), other dates
+    accumulate untouched. Identity = (snapshot_date, carrier, state, offer_id or offer_name).
+    Reindexed to CONVERGENT_COLUMNS so an older sheet that lacks a column can't shift the order."""
+    if not fresh.empty and "snapshot_date" in existing.columns and not existing.empty:
+        existing = existing[~existing["snapshot_date"].isin(set(fresh["snapshot_date"].dropna().unique()))]
+    df = pd.concat([existing, fresh], ignore_index=True)
+    if df.empty:
+        return df.reindex(columns=CONVERGENT_COLUMNS)
+    oid = df["offer_id"].astype("string") if "offer_id" in df.columns else pd.Series(pd.NA, index=df.index, dtype="string")
+    df["_key"] = oid.where(oid.notna() & (oid.str.strip() != ""), df["offer_name"].astype("string"))
+    df = df.drop_duplicates(subset=["snapshot_date", "carrier", "state", "_key"], keep="last")
+    df = df.sort_values(["snapshot_date", "carrier", "offer_name"]).reset_index(drop=True)
+    return df.reindex(columns=CONVERGENT_COLUMNS)      # also drops the temporary `_key`
+
+
+def _read_convergent(path: Path) -> pd.DataFrame:
+    """Existing `convergent_history` rows, or an empty frame. NOTE (#31): `write_workbook` rebuilds
+    the whole file (ExcelWriter mode 'w'), so a sheet that is not re-emitted is LOST — the convergent
+    history is therefore ALWAYS read and re-written, even on a run that collected no convergent data
+    (a failed/skipped convergent scrape must never wipe the convergent history)."""
+    if not path.exists():
+        return pd.DataFrame(columns=CONVERGENT_COLUMNS)
+    try:
+        return pd.read_excel(path, sheet_name="convergent_history", dtype={"snapshot_date": str})
+    except Exception:
+        return pd.DataFrame(columns=CONVERGENT_COLUMNS)    # sheet absent (pre-#31 workbook) or unreadable
 
 
 def _compute_changes(history: pd.DataFrame) -> pd.DataFrame:
@@ -755,6 +787,30 @@ def _current_price_bar(ws, comp_ws, last):
     return chart
 
 
+# ---- convergent offers (#31) — a SEPARATE domain: combos (mobile + fiber [+ TV/landline]) ------------
+def _write_convergent_history(xl, conv: pd.DataFrame):
+    """`convergent_history` = append-only combo offers, one row per offer per snapshot_date (CONTEXT
+    §14). Deliberately a PLAIN, flat sheet next to the mobile sheets — no formulas, no cached-value
+    bake, no charts — so nothing here can perturb the mobile matrix/bake/charts. Written on EVERY run
+    (even when empty) because ExcelWriter rebuilds the file; an empty frame still emits the headers so
+    the sheet exists and the schema is visible from day one."""
+    df = conv if len(conv) else pd.DataFrame(columns=CONVERGENT_COLUMNS)
+    # DATA FIRST, unguarded and unadorned: this is the one call that must not be skipped, because a
+    # missing sheet means the accumulated convergent history is gone on the NEXT read (the file is
+    # rebuilt each run). Cosmetics are applied separately and are allowed to fail. (review #31)
+    df.to_excel(xl, sheet_name="convergent_history", index=False)
+    ws = xl.sheets["convergent_history"]
+    try:
+        cur = (CONVERGENT_COLUMNS.index("price_brl") + 1, CONVERGENT_COLUMNS.index("price_promo_brl") + 1)
+        num = (CONVERGENT_COLUMNS.index("broadband_speed_mbps") + 1,
+               CONVERGENT_COLUMNS.index("mobile_gb") + 1,
+               CONVERGENT_COLUMNS.index("mobile_lines") + 1)
+        _format_sheet(ws, cur, num, tab_color=TAB_COLORS["convergent_history"], autofilter=True)
+    except Exception as e:      # styling only — the rows are already in the sheet
+        print(f"convergent: sheet formatting failed ({type(e).__name__}: {e}) - data written unstyled")
+    return ws
+
+
 # ---- cached-value bake (#21) — so the committed workbook DISPLAYS in any viewer, keeping formulas ------
 _SS_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -828,7 +884,11 @@ def _bake_cached_values(path, value_map: dict) -> int:
     return baked
 
 
-def write_workbook(plans, path: str | Path, run_ts: datetime) -> dict:
+def write_workbook(plans, path: str | Path, run_ts: datetime, convergent=None) -> dict:
+    """Rebuild the workbook from `plans` (mobile) — and, additively, the `convergent_history` sheet
+    (#31). `convergent` is an optional list of ConvergentOffer; None/empty means "collected nothing
+    this run", which PRESERVES the existing convergent history rather than dropping it (the sheet is
+    always read + re-emitted because ExcelWriter rebuilds the file)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fresh = _df(plans)
@@ -840,6 +900,20 @@ def write_workbook(plans, path: str | Path, run_ts: datetime) -> dict:
         except Exception:
             existing = pd.DataFrame(columns=COLUMNS)
 
+    # Convergent (#31) — read ALWAYS (see _read_convergent), merge only what this run collected.
+    # GUARDED: convergent is an additive side-domain, so a problem building it must degrade to
+    # "keep what we already had" and NEVER fail the mobile workbook write (main.py guards the scrape;
+    # this guards the write path itself — collection of mobile data > convergent).
+    try:
+        conv_fresh = pd.DataFrame([o.as_row() for o in (convergent or [])], columns=CONVERGENT_COLUMNS)
+        conv_history = _merge_convergent(_read_convergent(path), conv_fresh)
+    except Exception as e:                                    # noqa: BLE001 - must not break the run
+        print(f"convergent: merge failed ({type(e).__name__}: {e}) - keeping existing rows")
+        try:
+            conv_history = _read_convergent(path)
+        except Exception:
+            conv_history = pd.DataFrame(columns=CONVERGENT_COLUMNS)
+
     history = _merge_history(existing, fresh)
     latest_date = history["snapshot_date"].max()
     latest = history[history.snapshot_date == latest_date].reset_index(drop=True)
@@ -848,6 +922,7 @@ def write_workbook(plans, path: str | Path, run_ts: datetime) -> dict:
     # price columns -> currency; data_gb -> number. (1-based indices from COLUMNS)
     cur_cols = (COLUMNS.index("price_brl") + 1, COLUMNS.index("price_promo_brl") + 1)
     num_cols = (COLUMNS.index("data_gb") + 1,)
+    conv_written = True                     # flipped by the last-resort guard below (#31)
 
     with pd.ExcelWriter(path, engine="openpyxl") as xl:
         history.to_excel(xl, sheet_name="history", index=False)
@@ -870,6 +945,16 @@ def write_workbook(plans, path: str | Path, run_ts: datetime) -> dict:
         _write_charts(xl, comp_ws, EVO_FIRST, comp_last)      # 4 line charts + bar chart on `Charts` (#17/#20)
         _write_ranking(xl, latest)           # validated cross-section (rank-aligned, today)
         _write_operator_sheets(xl, latest)   # one tab per carrier (by-operator catalog view)
+        try:                                          # combo offers — separate domain, additive (#31)
+            _write_convergent_history(xl, conv_history)
+        except Exception as e:                        # never let the side-domain break the mobile write
+            # Last-resort guard. The sheet is now absent from THIS workbook, so the accumulated
+            # convergent rows will not be re-readable next run — say so LOUDLY rather than reporting
+            # a count that was never persisted (the mobile snapshot is unaffected and still commits).
+            conv_written = False
+            print(f"convergent: SHEET WRITE FAILED ({type(e).__name__}: {e}) — convergent_history is "
+                  f"MISSING from this workbook and {len(conv_history)} row(s) were not persisted; "
+                  f"the mobile data is unaffected")
         # Open on the clean `comparison` table, not on `history`: set it active + the only selected tab.
         comp_idx = xl.book.index(comp_ws)
         xl.book.active = comp_idx
@@ -895,6 +980,10 @@ def write_workbook(plans, path: str | Path, run_ts: datetime) -> dict:
         "plans_in_latest": int(len(latest)),
         "snapshots_in_history": int(history["snapshot_date"].nunique()),
         "changes": int(len(changes)),
+        # counts describe what was actually PERSISTED to the sheet (0 if the write failed) — #31
+        "convergent_rows": int(len(conv_history)) if conv_written else 0,
+        "convergent_snapshots": (int(conv_history["snapshot_date"].nunique())
+                                 if conv_written and len(conv_history) else 0),
     }
 
 

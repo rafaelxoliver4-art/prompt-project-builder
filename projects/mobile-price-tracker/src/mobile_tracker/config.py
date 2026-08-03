@@ -66,6 +66,34 @@ class Settings:
                         url=url,
                     )
 
+    def convergent_targets(self) -> Iterator[tuple[Target, str]]:
+        """(Target, adapter_name) for each ACTIVE convergent/combo source × active state (#31,
+        CONTEXT §14). A separate domain from `targets()`: combos are scraped after the mobile pass
+        and written to their own sheet, so an inactive/absent `convergent:` section simply yields
+        nothing and the mobile pipeline is unchanged."""
+        states = self.active_states()
+        for code, c in (self.raw.get("convergent") or {}).items():
+            if not c.get("active"):
+                continue
+            adapter = c.get("adapter")
+            if not adapter:
+                continue
+            for state in states:
+                url = c["url"]
+                if c.get("state_in_url", False):
+                    url = url.format(state=state.lower())
+                yield (
+                    Target(
+                        carrier=code,
+                        render=c.get("render", "html"),
+                        category=c.get("category", "convergent"),
+                        category_label=c.get("label", c.get("display_name", code)),
+                        state=state,
+                        url=url,
+                    ),
+                    adapter,
+                )
+
 
 def load(path: Path | str = DEFAULT_CONFIG) -> Settings:
     with open(path, "r", encoding="utf-8") as fh:

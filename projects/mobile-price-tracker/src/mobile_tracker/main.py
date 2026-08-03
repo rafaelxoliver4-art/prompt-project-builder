@@ -56,11 +56,38 @@ def run(demo: bool = False, only: str | None = None) -> int:
         print("No plans collected — aborting write so history is not wiped.", file=sys.stderr)
         return 2
 
-    result = write_workbook(plans, settings.output_xlsx, run_ts)
+    # CONVERGENT (combo) offers — a SEPARATE domain (#31, CONTEXT §14), collected AFTER the mobile
+    # pass and FULLY GUARDED: every failure mode (import error, network, parse, bad config) is caught
+    # per target and logged, so a convergent problem can NEVER block the mobile scrape, the workbook
+    # write, or the commit (collection of mobile data > convergent). Skipped entirely in demo mode.
+    # NOTE: passing an empty list to write_workbook PRESERVES the existing convergent history — the
+    # sheet is always re-read and re-emitted (a rebuild would otherwise drop it).
+    convergent: list = []
+    if not demo:
+        try:
+            from .adapters import CONVERGENT_ADAPTERS
+            for ctarget, adapter_name in settings.convergent_targets():
+                cls = CONVERGENT_ADAPTERS.get(adapter_name)
+                if cls is None:
+                    print(f"  ! convergent {ctarget.carrier}: unknown adapter '{adapter_name}' - skipped")
+                    continue
+                try:
+                    got = cls(settings).fetch(ctarget)
+                    valid = [o.stamp(run_ts) for o in got if o.is_valid()]
+                    convergent.extend(valid)
+                    print(f"  convergent {ctarget.carrier}/{ctarget.category}: {len(valid)} offer(s)")
+                except Exception as e:                      # one source failing must not stop the rest
+                    print(f"  ! convergent {ctarget.carrier}/{ctarget.category}: "
+                          f"{type(e).__name__}: {e} - skipped")
+        except Exception as e:      # config/registry-level failure — skip the whole convergent pass
+            print(f"  ! convergent pass skipped ({type(e).__name__}: {e})")
+
+    result = write_workbook(plans, settings.output_xlsx, run_ts, convergent=convergent)
     print(
         f"Wrote {result['path']}: {result['plans_in_latest']} plans in latest "
         f"({result['snapshot_date']}), {result['snapshots_in_history']} snapshot(s), "
-        f"{result['changes']} change(s)."
+        f"{result['changes']} change(s); convergent: {len(convergent)} collected, "
+        f"{result['convergent_rows']} row(s) over {result['convergent_snapshots']} snapshot(s)."
     )
 
     # Daily price-change email alert (live only). Fully guarded — alerts must NEVER fail the job or
