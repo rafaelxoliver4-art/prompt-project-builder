@@ -28,7 +28,8 @@ from openpyxl.formatting.rule import ColorScaleRule, FormulaRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-from .convergent import CANONICAL_BUNDLE_TYPES, CONVERGENT_COLUMNS, bundle_type_of
+from .convergent import (CANONICAL_BUNDLE_TYPES, COMPARISON_BUNDLE_TYPES, CONVERGENT_COLUMNS,
+                         bundle_type_of, migrate_bundle_type_label)
 from .models import COLUMNS
 
 FONT = "Arial"
@@ -179,24 +180,27 @@ def _truthy(series: pd.Series) -> pd.Series:
 
 
 def _backfill_bundle_type(df: pd.DataFrame) -> pd.DataFrame:
-    """Derive `bundle_type` for rows that lack it (#33). Rows written before this column existed come
-    back from the sheet with it missing/NaN — but it is a pure function of the service flags, which
-    those rows DO have, so the whole history self-heals on the next write instead of leaving the
-    comparison matrix blank for past dates (the same treatment mobile columns got in #18)."""
+    """Keep `bundle_type` correct and CURRENT for every row (#33, migration in #34).
+
+    `bundle_type` is a pure function of the service flags, so where those flags are present we simply
+    RECOMPUTE it — which fixes both cases in one rule:
+      * rows written before the column existed (missing/NaN), and
+      * rows stored under a superseded label — the "Fibre …" → "Fiber …" rename of #34. Preserving a
+        stored value here (as #33 did) would leave historical rows spelled "Fibre + Mobile", they would
+        stop matching the matrix's criteria, and every past date would silently render BLANK.
+    When the flags are absent (an unexpectedly narrow sheet) we fall back to renaming the stored label
+    rather than dropping it. Same self-healing contract as the mobile column additions in #18."""
     if df.empty:
         return df
     flags = ("has_mobile", "has_broadband", "has_tv", "has_landline")
     if not all(f in df.columns for f in flags):
+        if "bundle_type" in df.columns:                      # no flags to derive from → migrate labels
+            df["bundle_type"] = [migrate_bundle_type_label(v) for v in df["bundle_type"]]
         return df
-    derived = [
+    df["bundle_type"] = [
         bundle_type_of(m, b, t, l)
         for m, b, t, l in zip(*(_truthy(df[f]) for f in flags))
     ]
-    if "bundle_type" in df.columns:
-        cur = df["bundle_type"].astype("string")
-        df["bundle_type"] = cur.where(cur.notna() & (cur.str.strip() != ""), pd.Series(derived, index=df.index))
-    else:
-        df["bundle_type"] = derived
     return df
 
 
@@ -843,15 +847,14 @@ def _write_convergent_history(xl, conv: pd.DataFrame):
 
 
 def convergent_bundle_types(conv: pd.DataFrame) -> list[str]:
-    """The comparison sheet's column groups (#33): the three canonical bundle types ALWAYS (so the
-    layout is stable even before a carrier publishes one), plus any other type actually present in the
-    data — a genuinely new shape (say "Mobile + TV" with no fibre) gets its OWN group rather than
-    being folded into an existing one. Offline-testable."""
-    extra: list[str] = []
-    if not conv.empty and "bundle_type" in conv.columns:
-        seen = {str(b).strip() for b in conv["bundle_type"].dropna() if str(b).strip()}
-        extra = sorted(seen - set(CANONICAL_BUNDLE_TYPES))
-    return CANONICAL_BUNDLE_TYPES + extra
+    """Every bundle type PRESENT in the collected history, canonical order first then any new shape.
+    This is the "what did we collect" view — used for the matrix's footnote, so a reader can see which
+    types exist but are not charted. The matrix itself shows `COMPARISON_BUNDLE_TYPES` (#34)."""
+    if conv.empty or "bundle_type" not in conv.columns:
+        return []
+    seen = {str(b).strip() for b in conv["bundle_type"].dropna() if str(b).strip()}
+    return ([t for t in CANONICAL_BUNDLE_TYPES if t in seen]
+            + sorted(seen - set(CANONICAL_BUNDLE_TYPES)))
 
 
 def _conv_cols():
@@ -888,19 +891,25 @@ def _conv_matrix_value(conv: pd.DataFrame, carrier: str, bundle: str, day_str: s
 
 
 def _write_convergent_comparison(xl, conv: pd.DataFrame):
-    """`convergent_comparison` (#33) — the combo equivalent of the mobile `comparison` matrix (§7).
-    Rows = one per snapshot_date in `convergent_history` (earliest first, auto-growing); columns =
-    BUNDLE-TYPE groups, each split TIM | Vivo | Claro. Every value cell is a LIVE exact-date MINIFS
-    over `convergent_history`, so the sheet fills itself as the daily job adds snapshots, and the
-    computed values are baked alongside (#21) so the committed file displays in any viewer.
+    """`convergent_comparison` (#33, scoped in #34) — the combo equivalent of the mobile `comparison`
+    matrix (§7). Rows = one per snapshot_date in `convergent_history` (earliest first, auto-growing);
+    columns = the bundle types in `COMPARISON_BUNDLE_TYPES`, each split TIM | Vivo | Claro. Every value
+    cell is a LIVE exact-date MINIFS over `convergent_history`, so the sheet fills itself as the daily
+    job adds snapshots, and the computed values are baked alongside (#21) so the committed file
+    displays in any viewer.
+
+    SCOPE (#34): the matrix shows **Fiber + Mobile only** — the like-for-like headline bundle every
+    carrier sells. All other bundle types are still COLLECTED into `convergent_history` (collection is
+    never filtered); they are simply not charted here, and the footnote names the ones on file.
+    Restoring a group is a one-line change to `COMPARISON_BUNDLE_TYPES` — no literals live here.
 
     Why cheapest WITHIN a bundle type rather than cheapest overall: carriers sell very different
-    things under one "combo" banner — a fibre+TV bundle is not a competitor to a fibre+mobile one, and
+    things under one "combo" banner — a fiber+TV bundle is not a competitor to a fiber+mobile one, and
     a single "cheapest combo" column would compare unlike with unlike. Returns (worksheet, {coord:
     value}) — an empty history yields a header-only sheet, never an exception."""
     ws = xl.book.create_sheet("convergent_comparison")
     _gridless(ws, TAB_COLORS["convergent_comparison"])
-    groups = convergent_bundle_types(conv)
+    groups = list(COMPARISON_BUNDLE_TYPES)      # the ONE knob (#34) — collection stays unfiltered
     pc, cc, bc, sc = _conv_cols()
     ncol = 1 + 3 * len(groups)
 
@@ -910,7 +919,7 @@ def _write_convergent_comparison(xl, conv: pd.DataFrame):
     for g, title in enumerate(groups):
         c0 = 2 + g * 3
         ws.merge_cells(start_row=HEAD1, start_column=c0, end_row=HEAD1, end_column=c0 + 2)
-        ws.cell(row=HEAD1, column=c0, value=title)
+        ws.cell(row=HEAD1, column=c0, value=f"{title} (R$/mo)")
         for k, carrier in enumerate(EVOLUTION_CARRIERS):
             ws.cell(row=HEAD2, column=c0 + k, value=EVOLUTION_DISP[carrier])
     _house_header(ws, HEAD1, ncol)
@@ -950,14 +959,20 @@ def _write_convergent_comparison(xl, conv: pd.DataFrame):
             rng = f"{get_column_letter(c0)}{FIRST}:{get_column_letter(c0 + 2)}{last}"
             ws.conditional_formatting.add(rng, _price_scale_2color())
 
+    others = [t for t in convergent_bundle_types(conv) if t not in groups]
+    shown = " / ".join(groups)
     note = ws.cell(row=max(last, FIRST) + 2, column=1,
-                   value="Rows = day. Each cell = the CHEAPEST combo that carrier offered of that "
-                         "bundle type on that snapshot_date — a live MINIFS over `convergent_history` "
-                         "matching the EXACT date (locale-safe text date, as in `comparison`). Compared "
-                         "WITHIN a bundle type so the columns are like-for-like (a fibre+TV bundle is "
-                         "not a competitor to a fibre+mobile one). A BLANK cell means that carrier sold "
-                         "no combo of that type that day — an honest gap, not a zero. Bundle type is "
-                         "derived from the offer's service flags; the sheet grows one row per day.")
+                   value=f"Rows = day. Each cell = the CHEAPEST {shown} combo that carrier offered on "
+                         "that snapshot_date — a live MINIFS over `convergent_history` matching the "
+                         "EXACT date (locale-safe text date, as in `comparison`). Compared WITHIN a "
+                         "bundle type so the columns are like-for-like (a fiber+TV bundle is not a "
+                         "competitor to a fiber+mobile one). A BLANK cell means that carrier sold no "
+                         f"such combo that day — an honest gap, not a zero."
+                         + (f" Other bundle types ARE still collected in `convergent_history` "
+                            f"({', '.join(others)}) — they are just not charted here."
+                            if others else "")
+                         + " Bundle type is derived from the offer's service flags; the sheet grows "
+                           "one row per day.")
     note.font = Font(name=FONT, italic=True, size=9, color="808080")
     ws.freeze_panes = f"B{FIRST}"
     ws.column_dimensions["A"].width = 13

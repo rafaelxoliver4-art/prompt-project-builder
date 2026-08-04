@@ -1,6 +1,6 @@
 # CONTEXT — Mobile Price Tracker
 
-> **Version:** 0.9.0 · **Last updated:** 2026-08-04 · Content decided by the Architect; written by Code.
+> **Version:** 0.9.1 · **Last updated:** 2026-08-04 · Content decided by the Architect; written by Code.
 > The *what / how / why* of this project and every decision behind it. This is the knowledge base and
 > IP. If someone read only this file, they should understand the project well enough to rebuild it.
 > **Standing rule (Bridge):** every CODE TASK ends by updating this file (durable knowledge) AND
@@ -378,6 +378,7 @@ Spot-checked the `comparison` sheet against the carriers' official pages + indep
 5. **NO LOYALTY HEADLINE PRICES — EVER (standing rule, 2026-07-13).** The tracked headline / entry-level price is **always the monthly price WITHOUT a loyalty/fidelity commitment** — for every carrier and category, **including TIM Fit**. Loyalty prices ("fidelidade" / "plano anual" / "prazo de permanência") are recorded only as context (`price_promo_brl` + `loyalty_months`) and are **excluded from every entry-level pick and cross-carrier ranking**. Applications: Vivo Easy Lite headline = the "Sem fidelidade" toggle price (#23/#26); TIM Fit entry = the Mensal, the Anual excluded (#28); any future loyalty-gated plan gets the same treatment. Distinct from payment method (the #27 Post decision — that's about billing rails, not commitment). Enforced fail-loud: the Vivo lite fetch detects a lost toggle capture and retries + warns (#30).
 
 ## 11. Changelog
+- **0.9.1 — 2026-08-04** — CODE TASK #34 (convergent, presentation/label only — no adapter, scraping, mobile-schema, mobile-matrix or mobile-bake change): **(a) "Fibre" → "Fiber"** everywhere user-visible or stored as a `bundle_type` label (`Fiber + Mobile` / `Fiber + TV` / `Fiber + Mobile + TV`, and the non-canonical fallback). **Historical rows are MIGRATED:** `_backfill_bundle_type` now RECOMPUTES `bundle_type` from the service flags on every write — they are the source of truth, so blanks *and* superseded spellings are fixed by one rule (with `migrate_bundle_type_label` as the no-flags fallback). This was the real regression risk: #33's version preserved any stored value, so past rows would have kept "Fibre …", stopped matching the matrix criteria and gone **blank for every past date**; verified against a workbook forced back to the legacy spelling — labels migrated and the past date still rendered. **(b) The `convergent_comparison` matrix is scoped to `Fiber + Mobile` only** (title `Fiber + Mobile (R$/mo)`), showing the **cheapest such combo per carrier per date**, driven by the single constant **`COMPARISON_BUNDLE_TYPES`** — restoring a group is a one-line change, no literals in the sheet builder. **Collection is untouched and unfiltered:** every bundle type is still written to `convergent_history` (13 / 8 / 3 on 2026-08-03) and the footnote names the ones on file but not charted, so the omission is visible; `convergent_bundle_types()` now reports what was collected and feeds that footnote. Live formulas + baked values retained and re-verified: **Excel COM recalc matched all cells (0 mismatches)** — 2026-08-03 row **TIM 89,99 / Vivo 160,00 / Claro 129,80**. Mobile untouched (2 394 rows / 43 snapshots). Tests 143 → **145**.
 - **0.9.0 — 2026-08-04** — CODE TASK #33 (convergent **phase 3**): the **`convergent_comparison`** sheet — the combo equivalent of the mobile matrix (§14). Rows = one per `snapshot_date` (earliest first, auto-growing); columns = **bundle-type groups × TIM|Vivo|Claro**; each cell = a **live exact-date `_xlfn.MINIFS`** over `convergent_history` with the **cached value baked** beside it (#21), styled like `comparison` (house header, gridlines off, per-block green→yellow scale, freeze B3, R$ format, in-sheet note). New derived column **`bundle_type`** on `convergent_history` — `Fibre + Mobile` / `Fibre + TV` / `Fibre + Mobile + TV`, computed from the existing service flags (**no new scraping**) and **backfilled** for pre-#33 rows so past dates aren't blank (the #18 self-healing pattern); an unseen shape gets its own group instead of being folded into an existing one. **Cheapest WITHIN a type, not overall** (Bridge's call) so columns stay like-for-like. Blank = the carrier sold no combo of that type that day (never a 0). Observed 2026-08-03 spread: **TIM** Fibre+Mobile only (3) · **Vivo** Fibre+Mobile (6) + Fibre+Mobile+TV (5) · **Claro** all three (4/3/3) — no fourth type; first row = Fibre+Mobile **89,99 / 160 / 129,80**, Fibre+TV **Claro 219,80**, Fibre+Mobile+TV **Vivo 190 / Claro 259,80**. `convergent_history.snapshot_date` **confirmed TEXT** (`data_type='s'`), so the locale-safe text-date construction is required and used; an **Excel COM recalc matched all 18 cells to the baked values (0 mismatches)**. The matrix builds inside its own guard nested in the convergent guard — a failure keeps the history sheet, empties `conv_values` (so the fail-loud bake check can't abort over a skipped side sheet) and never touches the mobile write. Mobile untouched (43 snapshots / matrix rows unchanged, Post TIM 119,99, Digital Vivo 45). Tests 132 → **143**.
 - **0.8.1 — 2026-08-03** — CODE TASK #32 (convergent **phase 2**): the remaining two carriers, both live. **Vivo Total** (`adapters/vivo_convergent.py`, Playwright — httpx is 403 behind Cloudflare): **11 SP combos R$160 → R$1 200**, 5 with TV, incl. the real V 1 Giga (1 Gbps + 600 GB + 11 lines + TV Completo). Traps handled: the **`VIV` code is NOT unique** (2 collisions across 11 cards) → `offer_id` = code + the card's own **sorted `productsIds`** composition (carrier-native, never price-derived, collision-proof, with a slug/position fallback so no card is dropped); **lazy render** → bounded scroll until the card count stops growing; the **paid apps add-on that hides the price element** → fall back to `data-original-price` and record the base price with a note (never base+add-on, never a dropped offer); struck-through prices become the promo, and **no session variant appeared this run** (all 11 flat, matching 07-17). **Claro Multi** (`adapters/claro_convergent.py`, **no browser**): `__NEXT_DATA__` `tab_select` grid (located **by component name** — a `card_360` of another product line sits on the same page) + **ONE batched** public `GET /api/catalog?state=SP&city=sao_paulo&uuids=…`; **10 live combos R$129,80 → R$459,80**, **5 ghosts** (`catalog.notFound` — listed by the CMS, not sold in SP) excluded; price = Σ(`precoCombo` **if the key is present** else `preco`) in integer centavos — the key is *absent* on `internet` for every Fibra+TV card, so a falsy-default read would under-price those by up to R$179,90; fields from `catalog.nomeAutomatico` (CMS names are stale) and speed from `recursosDescritivos["602"]`; SP is an **explicit request parameter**, not a geolocated guess. Both activated in `convergent:`; the #31 guards re-verified with **three** targets (a test proves one source exploding still lets the other two + the mobile write complete). Live end-to-end: **24 offers** (TIM 3 / Vivo 11 / Claro 10) with the mobile history (2 336 rows / 42 snapshots) untouched. Tests 120 → **132**.
 - **0.8.0 — 2026-08-03** — CODE TASK #31 (Bridge numbering "#26"; that number was already used twice in this repo — see the 0.5.8 and 0.7.1 entries — so this ships as **#31**): **CONVERGENT OFFERS become a tracked domain (phase 1)** — new **§14**. Live investigation of all three SP combo pages: **all DISCRETE priced tiers, none a configurator**; two §13 facts corrected — TIM's Ultracombo page now **exists** (httpx 200; it 404'd on 07-17) and Claro Multi's prices are now reachable **without a browser** (`__NEXT_DATA__` grid + one public `/api/catalog` call); Vivo Total still needs Playwright (Cloudflare now, not Akamai). New **separate** schema `ConvergentOffer`/`CONVERGENT_COLUMNS` (`convergent.py`) — `offer_id` carrier-native & never price-derived, derived `services` summary, `is_valid()` demands ≥2 bundled services, `payment_method` for the billing rail. New **`convergent_history`** sheet: append-only, same per-date idempotency as the mobile history, flat (no formulas/bake/charts) — and **always re-read + re-emitted**, because `write_workbook` rebuilds the file and would otherwise DESTROY it on any run that collected nothing. First scraper: **TIM Ultracombo** (`adapters/tim_convergent.py`, plain httpx) — live-verified 3 SP combos **R$ 89,99 / 139,99 / 169,99** (500M+65GB / 1G+70GB / 1G+115GB, one line each, no TV), ids = native nids. Built around three verified traps: the **ghost price fields** (`field_preco_adicional_*`, identical on all tiers — the mobile adapter treats that field as a real struck-through price, so reusing it would fake a promo on every combo), **`langcode` lying "rj"** for SP-only offers (gate on `field_regioes`), and streaming living in **icon media names**. Wired into the daily job **GUARDED at two layers** (per-target in `main.run()` + around the merge/sheet-write inside `write_workbook`) so no convergent failure can block the mobile scrape, write or commit; `--demo` skips it. Config gains a **`convergent:`** section (TIM active; Vivo/Claro staged for phase 2). Mobile pipeline untouched — matrix, formulas, #21 bake, charts, alerts, idempotency all verified unchanged. Tests 106 → **119**.
@@ -676,7 +677,7 @@ committed file displays everywhere while Excel still recalculates.
 
 **Bundle types (the comparison axis).** A new derived column `bundle_type` on `convergent_history`,
 computed from the existing service flags — **no extra scraping**:
-`Fibre + Mobile` · `Fibre + TV` · `Fibre + Mobile + TV`. It is a pure function of the flags, so rows
+`Fiber + Mobile` · `Fiber + TV` · `Fiber + Mobile + TV`. It is a pure function of the flags, so rows
 written before the column existed are **backfilled on the next write** (`_backfill_bundle_type`),
 exactly as the mobile column additions self-healed in #18 — otherwise the matrix would be blank for
 every past date. A shape outside the canonical three (say `Mobile + TV` with no fibre) gets a
@@ -684,7 +685,7 @@ descriptive label and **its own column group**, appended by `convergent_bundle_t
 being folded into an existing one.
 
 **Why cheapest WITHIN a type, not cheapest overall** (the Bridge's call): carriers sell very different
-things under one "combo" banner — a fibre+TV bundle is not a competitor to a fibre+mobile one, so a
+things under one "combo" banner — a fiber+TV bundle is not a competitor to a fiber+mobile one, so a
 single "cheapest combo" column would compare unlike with unlike and would flip meaning whenever a
 carrier launched a cheaper but thinner bundle. Comparing within a type keeps every column like-for-like.
 
@@ -693,14 +694,14 @@ carrier launched a cheaper but thinner bundle. Comparing within a type keeps eve
 
 **Observed spread (2026-08-03, 24 offers):**
 
-| carrier | Fibre + Mobile | Fibre + TV | Fibre + Mobile + TV |
+| carrier | Fiber + Mobile | Fiber + TV | Fiber + Mobile + TV |
 |---|---|---|---|
 | **TIM** | 3 | — | — |
 | **Vivo** | 6 | — | 5 |
 | **Claro** | 4 | 3 | 3 |
 
-…giving the first matrix row: Fibre + Mobile **TIM 89,99 / Vivo 160 / Claro 129,80** · Fibre + TV
-**Claro 219,80** only · Fibre + Mobile + TV **Vivo 190 / Claro 259,80** (TIM blank — it sells no TV
+…giving the first matrix row: Fiber + Mobile **TIM 89,99 / Vivo 160 / Claro 129,80** · Fiber + TV
+**Claro 219,80** only · Fiber + Mobile + TV **Vivo 190 / Claro 259,80** (TIM blank — it sells no TV
 combo). **No fourth bundle type appeared.**
 
 **Verification:** `_conv_matrix_value` mirrors `_conv_minifs_day` exactly (the `_matrix_value`
@@ -713,6 +714,26 @@ construction is required and used.
 convergent guard — a matrix failure keeps the collected `convergent_history` sheet, leaves
 `conv_values` empty (so the fail-loud bake check can't abort the run over a skipped side sheet), and
 never touches the mobile write. Tested.
+
+#### Spelling + scope (#34)
+- **"Fiber", not "Fibre"** (the Bridge's call) — the `bundle_type` labels are `Fiber + Mobile` /
+  `Fiber + TV` / `Fiber + Mobile + TV`, and the fallback label for a non-canonical shape uses "Fiber"
+  too. **Historical rows are MIGRATED, not just new ones:** `_backfill_bundle_type` now **recomputes**
+  `bundle_type` from the service flags on every write (they are the source of truth), which fixes
+  blanks *and* the old spelling in one rule; if the flags are ever absent it falls back to
+  `migrate_bundle_type_label`. This mattered — #33's version *preserved* any stored value, so past
+  rows would have stayed "Fibre + Mobile", stopped matching the matrix criteria and rendered **blank
+  for every past date**. Verified on a workbook forced back to the legacy spelling: labels migrated
+  and the past date still rendered 89,99 / 160,00 / 129,80.
+- **The matrix shows `Fiber + Mobile` ONLY** — the like-for-like headline bundle all three carriers
+  sell — as **the cheapest such combo per carrier per date**. Controlled by the single constant
+  **`COMPARISON_BUNDLE_TYPES`** in `convergent.py`; restoring a group is a one-line change and no
+  literals are hard-coded in the sheet builder. The group title renders as `Fiber + Mobile (R$/mo)`.
+- **Collection is unchanged and unfiltered:** every bundle type is still scraped into
+  `convergent_history` (2026-08-03: Fiber+Mobile 13, Fiber+Mobile+TV 8, Fiber+TV 3 across the three
+  carriers). The sheet's footnote names the types on file but not charted, so the omission is visible
+  rather than silent. `convergent_bundle_types(conv)` now reports *what was collected* (it feeds that
+  footnote); the matrix itself renders `COMPARISON_BUNDLE_TYPES`.
 
 **Next (phase 4, optional):** charts for the convergent matrix (the `Charts`-sheet treatment), and/or
 a convergent price-change alert.

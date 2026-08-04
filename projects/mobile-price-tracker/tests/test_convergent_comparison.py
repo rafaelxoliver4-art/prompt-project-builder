@@ -9,9 +9,10 @@ from datetime import date, datetime
 import openpyxl
 import pandas as pd
 
-from mobile_tracker.convergent import (BUNDLE_FIBRE_MOBILE, BUNDLE_FIBRE_MOBILE_TV, BUNDLE_FIBRE_TV,
-                                       CANONICAL_BUNDLE_TYPES, CONVERGENT_COLUMNS, ConvergentOffer,
-                                       bundle_type_of)
+from mobile_tracker.convergent import (BUNDLE_FIBER_MOBILE, BUNDLE_FIBER_MOBILE_TV, BUNDLE_FIBER_TV,
+                                       CANONICAL_BUNDLE_TYPES, COMPARISON_BUNDLE_TYPES,
+                                       CONVERGENT_COLUMNS, ConvergentOffer, bundle_type_of,
+                                       migrate_bundle_type_label)
 from mobile_tracker.excel_writer import (_conv_matrix_value, convergent_bundle_types, write_workbook)
 from mobile_tracker.models import Plan
 
@@ -34,23 +35,46 @@ def _co(carrier, name, oid, price, date_str, *, mobile=True, broadband=True, tv=
 
 
 # ---- bundle_type derivation ------------------------------------------------------------------
-def test_bundle_type_derived_from_service_flags():
-    assert bundle_type_of(True, True, False) == BUNDLE_FIBRE_MOBILE
-    assert bundle_type_of(False, True, True) == BUNDLE_FIBRE_TV
-    assert bundle_type_of(True, True, True) == BUNDLE_FIBRE_MOBILE_TV
+def test_bundle_type_derived_from_service_flags_uses_fiber_spelling():
+    """#34: the labels are spelled "Fiber" (US), including the fallback for a non-canonical shape."""
+    assert bundle_type_of(True, True, False) == BUNDLE_FIBER_MOBILE == "Fiber + Mobile"
+    assert bundle_type_of(False, True, True) == BUNDLE_FIBER_TV == "Fiber + TV"
+    assert bundle_type_of(True, True, True) == BUNDLE_FIBER_MOBILE_TV == "Fiber + Mobile + TV"
     # a shape outside the canonical three keeps its OWN identity instead of being folded into one
     assert bundle_type_of(True, False, True) == "Mobile + TV"
-    assert bundle_type_of(False, True, False, True) == "Fibre + Landline"
+    assert bundle_type_of(False, True, False, True) == "Fiber + Landline"
+    assert not any("Fibre" in t for t in CANONICAL_BUNDLE_TYPES)
     # fewer than two services is not a convergent offer at all
     assert bundle_type_of(True, False, False) is None
     assert bundle_type_of(False, False, False) is None
 
 
+def test_legacy_fibre_labels_are_migrated(tmp_path):
+    """#34 THE regression risk: rows stored under the old "Fibre …" spelling must be rewritten on the
+    next write, or they stop matching the matrix criteria and every past date renders BLANK.
+    `bundle_type` is a pure function of the service flags, so the merge RECOMPUTES it."""
+    from mobile_tracker.excel_writer import _backfill_bundle_type
+    assert migrate_bundle_type_label("Fibre + Mobile") == BUNDLE_FIBER_MOBILE
+    assert migrate_bundle_type_label("Fibre + Mobile + TV") == BUNDLE_FIBER_MOBILE_TV
+    assert migrate_bundle_type_label("Mobile + TV") == "Mobile + TV"          # untouched
+    legacy = pd.DataFrame([
+        {"bundle_type": "Fibre + Mobile", "has_mobile": True, "has_broadband": True,
+         "has_tv": False, "has_landline": False},
+        {"bundle_type": "Fibre + TV", "has_mobile": False, "has_broadband": True,
+         "has_tv": True, "has_landline": False},
+    ])
+    out = _backfill_bundle_type(legacy.copy())
+    assert list(out["bundle_type"]) == [BUNDLE_FIBER_MOBILE, BUNDLE_FIBER_TV]
+    # …and with the flags missing entirely it still renames rather than dropping the value
+    no_flags = _backfill_bundle_type(pd.DataFrame([{"bundle_type": "Fibre + Mobile"}]))
+    assert list(no_flags["bundle_type"]) == [BUNDLE_FIBER_MOBILE]
+
+
 def test_offer_exposes_bundle_type_in_its_row():
     o = _co("vivo", "Ultra + TV", "vivo:1", 190.0, "2026-08-03", tv=True)
-    assert o.bundle_type == BUNDLE_FIBRE_MOBILE_TV
+    assert o.bundle_type == BUNDLE_FIBER_MOBILE_TV
     row = o.as_row()
-    assert row["bundle_type"] == BUNDLE_FIBRE_MOBILE_TV
+    assert row["bundle_type"] == BUNDLE_FIBER_MOBILE_TV
     assert list(row) == CONVERGENT_COLUMNS              # schema order preserved
 
 
@@ -68,13 +92,16 @@ def test_bundle_type_backfilled_for_rows_written_before_the_column_existed(tmp_p
                          columns=CONVERGENT_COLUMNS)
     merged = _merge_convergent(existing, fresh)
     assert list(merged.columns) == CONVERGENT_COLUMNS                       # order enforced
-    assert set(merged["bundle_type"]) == {BUNDLE_FIBRE_MOBILE}              # old row backfilled
+    assert set(merged["bundle_type"]) == {BUNDLE_FIBER_MOBILE}              # old row backfilled
 
 
-def test_group_list_is_canonical_plus_any_new_shape():
-    assert convergent_bundle_types(pd.DataFrame()) == CANONICAL_BUNDLE_TYPES     # stable when empty
-    conv = pd.DataFrame({"bundle_type": [BUNDLE_FIBRE_MOBILE, "Mobile + TV", None]})
-    assert convergent_bundle_types(conv) == CANONICAL_BUNDLE_TYPES + ["Mobile + TV"]
+def test_bundle_types_present_reports_what_was_collected():
+    """`convergent_bundle_types` = what the HISTORY holds (used for the footnote); the matrix itself
+    shows `COMPARISON_BUNDLE_TYPES` (#34)."""
+    assert convergent_bundle_types(pd.DataFrame()) == []
+    conv = pd.DataFrame({"bundle_type": [BUNDLE_FIBER_TV, BUNDLE_FIBER_MOBILE, "Mobile + TV", None]})
+    assert convergent_bundle_types(conv) == [BUNDLE_FIBER_MOBILE, BUNDLE_FIBER_TV, "Mobile + TV"]
+    assert COMPARISON_BUNDLE_TYPES == [BUNDLE_FIBER_MOBILE]      # the one knob that scopes the sheet
 
 
 # ---- the matrix ------------------------------------------------------------------------------
@@ -93,11 +120,24 @@ def _wb_with_two_days(tmp_path):
     return out
 
 
+def test_matrix_shows_only_the_fiber_mobile_group(tmp_path):
+    """#34: exactly ONE group — Fiber + Mobile. The Fiber+TV and Fiber+Mobile+TV offers in the same
+    history must not produce further column blocks."""
+    out = _wb_with_two_days(tmp_path)
+    ws = openpyxl.load_workbook(out, data_only=True)["convergent_comparison"]
+    # NB: read max_column BEFORE touching any cell — ws.cell(r, c) CREATES the cell in openpyxl and
+    # would itself extend the sheet, making this assertion self-defeating.
+    assert ws.max_column == 4                                    # Date + exactly 3 carrier columns
+    assert [c.value for c in ws[1]] == ["Date", "Fiber + Mobile (R$/mo)", None, None]
+    assert [c.value for c in ws[2]] == [None, "TIM", "Vivo", "Claro"]
+    # …while the history still holds every bundle type (collection is never filtered)
+    conv = pd.read_excel(out, sheet_name="convergent_history")
+    assert {BUNDLE_FIBER_MOBILE, BUNDLE_FIBER_TV, BUNDLE_FIBER_MOBILE_TV} <= set(conv["bundle_type"])
+
+
 def test_matrix_layout_rows_per_date_earliest_first(tmp_path):
     ws = openpyxl.load_workbook(_wb_with_two_days(tmp_path), data_only=True)["convergent_comparison"]
     assert ws.cell(1, 1).value == "Date"
-    groups = [ws.cell(1, 2 + g * 3).value for g in range(len(CANONICAL_BUNDLE_TYPES))]
-    assert groups == CANONICAL_BUNDLE_TYPES
     assert [ws.cell(2, c).value for c in (2, 3, 4)] == ["TIM", "Vivo", "Claro"]
     rows = [r for r in range(FIRST, ws.max_row + 1) if isinstance(ws.cell(r, 1).value, date)]
     assert len(rows) == 2                                            # one row per snapshot_date
@@ -109,27 +149,22 @@ def test_cells_are_exact_date_minifs_over_convergent_history(tmp_path):
     ws = openpyxl.load_workbook(_wb_with_two_days(tmp_path), data_only=False)["convergent_comparison"]
     f = ws.cell(FIRST, 2).value
     assert f.startswith("=IFERROR(") and "_xlfn.MINIFS(convergent_history!" in f
-    assert '"tim"' in f and f'"{BUNDLE_FIBRE_MOBILE}"' in f
+    assert '"tim"' in f and f'"{BUNDLE_FIBER_MOBILE}"' in f
     # the locale-safe TEXT date (convergent_history stores snapshot_date as text, like `history`)
     assert f'YEAR($A{FIRST})&"-"&TEXT(MONTH($A{FIRST}),"00")&"-"&TEXT(DAY($A{FIRST}),"00")' in f
     assert 'IF(' in f and '=0,""' in f                               # 0 / no match → blank
 
 
-def test_cheapest_within_bundle_type_and_blanks_where_absent(tmp_path):
+def test_cheapest_fiber_mobile_per_carrier_and_blanks_where_absent(tmp_path):
     ws = openpyxl.load_workbook(_wb_with_two_days(tmp_path), data_only=True)["convergent_comparison"]
-    # Fibre + Mobile block (cols B/C/D) on the first date
+    # the single Fiber + Mobile block (cols B/C/D) on the first date
     assert ws.cell(FIRST, 2).value == 89.99          # TIM: cheapest of 89,99 / 139,99
-    assert ws.cell(FIRST, 3).value == 160.0          # Vivo
-    assert ws.cell(FIRST, 4).value == 129.80         # Claro
-    # Fibre + TV block (E/F/G): only Claro sells one → the others are BLANK, never 0
-    assert ws.cell(FIRST, 5).value is None and ws.cell(FIRST, 6).value is None
-    assert ws.cell(FIRST, 7).value == 219.80
-    # Fibre + Mobile + TV block (H/I/J): only Vivo
-    assert ws.cell(FIRST, 8).value is None
-    assert ws.cell(FIRST, 9).value == 190.0
-    assert ws.cell(FIRST, 10).value is None
-    # the TV-bearing Vivo offer must NOT leak into the Fibre+Mobile column
-    assert ws.cell(FIRST, 3).value == 160.0
+    assert ws.cell(FIRST, 3).value == 160.0          # Vivo — NOT its 190 Fiber+Mobile+TV combo
+    assert ws.cell(FIRST, 4).value == 129.80         # Claro — NOT its 219,80 Fiber+TV combo
+    # day 2: only TIM and Claro published → Vivo's cell is BLANK, never 0
+    assert ws.cell(FIRST + 1, 2).value == 94.99
+    assert ws.cell(FIRST + 1, 3).value is None
+    assert ws.cell(FIRST + 1, 4).value == 139.80
 
 
 def test_baked_values_match_the_formula_helper(tmp_path):
@@ -137,7 +172,7 @@ def test_baked_values_match_the_formula_helper(tmp_path):
     out = _wb_with_two_days(tmp_path)
     conv = pd.read_excel(out, sheet_name="convergent_history", dtype={"snapshot_date": str})
     ws = openpyxl.load_workbook(out, data_only=True)["convergent_comparison"]
-    groups = convergent_bundle_types(conv)
+    groups = COMPARISON_BUNDLE_TYPES
     rows = [r for r in range(FIRST, ws.max_row + 1) if isinstance(ws.cell(r, 1).value, date)]
     checked = 0
     for r in rows:
@@ -153,12 +188,15 @@ def test_baked_values_match_the_formula_helper(tmp_path):
 def test_matrix_has_a_colour_scale_per_bundle_block_and_a_note(tmp_path):
     out = _wb_with_two_days(tmp_path)
     ws = openpyxl.load_workbook(out)["convergent_comparison"]
-    assert len(list(ws.conditional_formatting)) >= len(CANONICAL_BUNDLE_TYPES)
+    assert len(list(ws.conditional_formatting)) >= len(COMPARISON_BUNDLE_TYPES)
     assert ws.freeze_panes == f"B{FIRST}"
     assert ws.sheet_view.showGridLines is False
     texts = [c.value for row in ws.iter_rows() for c in row if isinstance(c.value, str)]
     note = next((t for t in texts if "BLANK cell" in t), None)
-    assert note and "bundle type" in note.lower()
+    assert note and "Fiber + Mobile" in note
+    # the note must say the other types are still collected, and name them (#34)
+    assert "still collected" in note
+    assert BUNDLE_FIBER_TV in note and BUNDLE_FIBER_MOBILE_TV in note
 
 
 def test_empty_convergent_history_still_yields_a_header_only_sheet(tmp_path):
@@ -166,7 +204,7 @@ def test_empty_convergent_history_still_yields_a_header_only_sheet(tmp_path):
     write_workbook([_plan(100.0, "2026-08-03")], out, datetime(2026, 8, 3, 18))   # no convergent
     ws = openpyxl.load_workbook(out)["convergent_comparison"]
     assert ws.cell(1, 1).value == "Date"
-    assert [ws.cell(1, 2 + g * 3).value for g in range(3)] == CANONICAL_BUNDLE_TYPES
+    assert ws.cell(1, 2).value == "Fiber + Mobile (R$/mo)"       # layout stable with no data
     assert not [r for r in range(FIRST, ws.max_row + 1) if isinstance(ws.cell(r, 1).value, date)]
 
 

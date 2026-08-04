@@ -51,33 +51,55 @@ SERVICE_ORDER = ["mobile", "broadband", "tv", "landline"]
 
 # BUNDLE TYPES (#33) — the comparison axis. Carriers price very different things under one "combo"
 # banner, so the `convergent_comparison` matrix compares the cheapest offer WITHIN a type rather than
-# the cheapest overall (a fibre-only-plus-TV bundle is not a competitor to a fibre+mobile one).
+# the cheapest overall (a fiber-only-plus-TV bundle is not a competitor to a fiber+mobile one).
 # These three cover every SP offer observed 2026-08-03; `bundle_type_of` falls back to a readable
-# label built from the service flags, so a genuinely new shape gets its OWN group instead of being
-# silently forced into one of these (the matrix builder appends any extra type it finds).
-BUNDLE_FIBRE_MOBILE = "Fibre + Mobile"
-BUNDLE_FIBRE_TV = "Fibre + TV"
-BUNDLE_FIBRE_MOBILE_TV = "Fibre + Mobile + TV"
-CANONICAL_BUNDLE_TYPES = [BUNDLE_FIBRE_MOBILE, BUNDLE_FIBRE_TV, BUNDLE_FIBRE_MOBILE_TV]
+# label built from the service flags, so a genuinely new shape gets its OWN label instead of being
+# silently forced into one of these.
+# SPELLING (#34): "Fiber" (US), not "Fibre" — the Bridge's call. `_backfill_bundle_type` MIGRATES rows
+# stored under the old "Fibre …" spelling, otherwise past dates would stop matching the matrix's
+# criteria and render blank.
+BUNDLE_FIBER_MOBILE = "Fiber + Mobile"
+BUNDLE_FIBER_TV = "Fiber + TV"
+BUNDLE_FIBER_MOBILE_TV = "Fiber + Mobile + TV"
+CANONICAL_BUNDLE_TYPES = [BUNDLE_FIBER_MOBILE, BUNDLE_FIBER_TV, BUNDLE_FIBER_MOBILE_TV]
+
+# THE single knob controlling which bundle types the `convergent_comparison` matrix DISPLAYS (#34).
+# Every bundle type is still COLLECTED into `convergent_history` — this only scopes the view. Adding
+# a type back to the matrix is a one-line change here; nothing else hard-codes a group.
+COMPARISON_BUNDLE_TYPES = [BUNDLE_FIBER_MOBILE]
+
+# Legacy → current bundle_type labels, applied when migrating a stored history (#34).
+BUNDLE_TYPE_RENAMES = {
+    "Fibre + Mobile": BUNDLE_FIBER_MOBILE,
+    "Fibre + TV": BUNDLE_FIBER_TV,
+    "Fibre + Mobile + TV": BUNDLE_FIBER_MOBILE_TV,
+}
 
 
 def bundle_type_of(has_mobile: bool, has_broadband: bool, has_tv: bool,
                    has_landline: bool = False) -> str | None:
     """The comparison group for a combo, derived from the service flags — no extra scraping (#33).
     None when fewer than two services are set (not a convergent offer at all). Anything outside the
-    three canonical shapes returns a descriptive label (e.g. "Mobile + TV") so it can be charted as
-    its own group rather than distorting an existing one."""
+    three canonical shapes returns a descriptive label (e.g. "Mobile + TV") so it keeps its own
+    identity rather than distorting an existing group."""
     if sum((bool(has_mobile), bool(has_broadband), bool(has_tv), bool(has_landline))) < 2:
         return None
     if has_broadband and has_mobile and has_tv:
-        return BUNDLE_FIBRE_MOBILE_TV
+        return BUNDLE_FIBER_MOBILE_TV
     if has_broadband and has_mobile:
-        return BUNDLE_FIBRE_MOBILE
+        return BUNDLE_FIBER_MOBILE
     if has_broadband and has_tv:
-        return BUNDLE_FIBRE_TV
-    label = {"mobile": "Mobile", "broadband": "Fibre", "tv": "TV", "landline": "Landline"}
+        return BUNDLE_FIBER_TV
+    label = {"mobile": "Mobile", "broadband": "Fiber", "tv": "TV", "landline": "Landline"}
     flags = {"mobile": has_mobile, "broadband": has_broadband, "tv": has_tv, "landline": has_landline}
     return " + ".join(label[s] for s in SERVICE_ORDER if flags[s])
+
+
+def migrate_bundle_type_label(value) -> str | None:
+    """Map a stored bundle_type onto the current spelling (#34). Used when the service flags are not
+    available to re-derive from — otherwise `_backfill_bundle_type` simply recomputes."""
+    s = str(value).strip() if value is not None and str(value).strip() else None
+    return BUNDLE_TYPE_RENAMES.get(s, s)
 
 
 @dataclass
