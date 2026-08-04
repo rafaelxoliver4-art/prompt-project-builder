@@ -29,6 +29,7 @@ CONVERGENT_COLUMNS: list[str] = [
     "payment_method",
     "price_note",
     "services",
+    "bundle_type",
     "has_mobile",
     "has_broadband",
     "has_tv",
@@ -47,6 +48,36 @@ CONVERGENT_COLUMNS: list[str] = [
 VALID_CARRIERS = {"vivo", "claro", "tim"}
 # Canonical service tokens, in the order they appear in the `services` summary string.
 SERVICE_ORDER = ["mobile", "broadband", "tv", "landline"]
+
+# BUNDLE TYPES (#33) — the comparison axis. Carriers price very different things under one "combo"
+# banner, so the `convergent_comparison` matrix compares the cheapest offer WITHIN a type rather than
+# the cheapest overall (a fibre-only-plus-TV bundle is not a competitor to a fibre+mobile one).
+# These three cover every SP offer observed 2026-08-03; `bundle_type_of` falls back to a readable
+# label built from the service flags, so a genuinely new shape gets its OWN group instead of being
+# silently forced into one of these (the matrix builder appends any extra type it finds).
+BUNDLE_FIBRE_MOBILE = "Fibre + Mobile"
+BUNDLE_FIBRE_TV = "Fibre + TV"
+BUNDLE_FIBRE_MOBILE_TV = "Fibre + Mobile + TV"
+CANONICAL_BUNDLE_TYPES = [BUNDLE_FIBRE_MOBILE, BUNDLE_FIBRE_TV, BUNDLE_FIBRE_MOBILE_TV]
+
+
+def bundle_type_of(has_mobile: bool, has_broadband: bool, has_tv: bool,
+                   has_landline: bool = False) -> str | None:
+    """The comparison group for a combo, derived from the service flags — no extra scraping (#33).
+    None when fewer than two services are set (not a convergent offer at all). Anything outside the
+    three canonical shapes returns a descriptive label (e.g. "Mobile + TV") so it can be charted as
+    its own group rather than distorting an existing one."""
+    if sum((bool(has_mobile), bool(has_broadband), bool(has_tv), bool(has_landline))) < 2:
+        return None
+    if has_broadband and has_mobile and has_tv:
+        return BUNDLE_FIBRE_MOBILE_TV
+    if has_broadband and has_mobile:
+        return BUNDLE_FIBRE_MOBILE
+    if has_broadband and has_tv:
+        return BUNDLE_FIBRE_TV
+    label = {"mobile": "Mobile", "broadband": "Fibre", "tv": "TV", "landline": "Landline"}
+    flags = {"mobile": has_mobile, "broadband": has_broadband, "tv": has_tv, "landline": has_landline}
+    return " + ".join(label[s] for s in SERVICE_ORDER if flags[s])
 
 
 @dataclass
@@ -96,6 +127,11 @@ class ConvergentOffer:
                  "tv": self.has_tv, "landline": self.has_landline}
         return "+".join(s for s in SERVICE_ORDER if flags[s])
 
+    @property
+    def bundle_type(self) -> str | None:
+        """The comparison group (see `bundle_type_of`) — derived, never scraped separately (#33)."""
+        return bundle_type_of(self.has_mobile, self.has_broadband, self.has_tv, self.has_landline)
+
     def is_valid(self) -> bool:
         """Minimum bar for a usable row: a real carrier, a state, a name, a price, and — the point
         of a CONVERGENT offer — at least TWO bundled services (a single-service offer is a plain
@@ -117,4 +153,5 @@ class ConvergentOffer:
     def as_row(self) -> dict:
         d = asdict(self)
         d["services"] = self.services          # a property, so not in asdict()
+        d["bundle_type"] = self.bundle_type    # ditto (#33)
         return {col: d.get(col) for col in CONVERGENT_COLUMNS}

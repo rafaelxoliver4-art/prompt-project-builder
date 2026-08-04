@@ -28,7 +28,7 @@ from openpyxl.formatting.rule import ColorScaleRule, FormulaRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-from .convergent import CONVERGENT_COLUMNS
+from .convergent import CANONICAL_BUNDLE_TYPES, CONVERGENT_COLUMNS, bundle_type_of
 from .models import COLUMNS
 
 FONT = "Arial"
@@ -62,6 +62,7 @@ TAB_COLORS = {
     "comparison": "2E7D32", "Charts": "43A047", "Ranking": "1565C0", "summary": "102A43",
     "history": "8A8A8A", "latest": "8A8A8A", "changes": "8A8A8A",
     "convergent_history": "6A1B9A",     # convergent/combo domain (#31) — distinct from the mobile sheets
+    "convergent_comparison": "8E24AA",  # the combo evolution matrix (#33) — same family, lighter
 }
 
 
@@ -166,7 +167,37 @@ def _merge_convergent(existing: pd.DataFrame, fresh: pd.DataFrame) -> pd.DataFra
     df["_key"] = oid.where(oid.notna() & (oid.str.strip() != ""), df["offer_name"].astype("string"))
     df = df.drop_duplicates(subset=["snapshot_date", "carrier", "state", "_key"], keep="last")
     df = df.sort_values(["snapshot_date", "carrier", "offer_name"]).reset_index(drop=True)
+    df = _backfill_bundle_type(df)                    # pre-#33 rows gain the derived column
     return df.reindex(columns=CONVERGENT_COLUMNS)      # also drops the temporary `_key`
+
+
+def _truthy(series: pd.Series) -> pd.Series:
+    """Excel round-trips booleans as True/False, 1/0 or the strings "True"/"VERDADEIRO" — normalise."""
+    if series.dtype == bool:
+        return series
+    return series.map(lambda v: str(v).strip().lower() in ("true", "1", "1.0", "verdadeiro", "sim", "yes"))
+
+
+def _backfill_bundle_type(df: pd.DataFrame) -> pd.DataFrame:
+    """Derive `bundle_type` for rows that lack it (#33). Rows written before this column existed come
+    back from the sheet with it missing/NaN — but it is a pure function of the service flags, which
+    those rows DO have, so the whole history self-heals on the next write instead of leaving the
+    comparison matrix blank for past dates (the same treatment mobile columns got in #18)."""
+    if df.empty:
+        return df
+    flags = ("has_mobile", "has_broadband", "has_tv", "has_landline")
+    if not all(f in df.columns for f in flags):
+        return df
+    derived = [
+        bundle_type_of(m, b, t, l)
+        for m, b, t, l in zip(*(_truthy(df[f]) for f in flags))
+    ]
+    if "bundle_type" in df.columns:
+        cur = df["bundle_type"].astype("string")
+        df["bundle_type"] = cur.where(cur.notna() & (cur.str.strip() != ""), pd.Series(derived, index=df.index))
+    else:
+        df["bundle_type"] = derived
+    return df
 
 
 def _read_convergent(path: Path) -> pd.DataFrame:
@@ -811,6 +842,130 @@ def _write_convergent_history(xl, conv: pd.DataFrame):
     return ws
 
 
+def convergent_bundle_types(conv: pd.DataFrame) -> list[str]:
+    """The comparison sheet's column groups (#33): the three canonical bundle types ALWAYS (so the
+    layout is stable even before a carrier publishes one), plus any other type actually present in the
+    data — a genuinely new shape (say "Mobile + TV" with no fibre) gets its OWN group rather than
+    being folded into an existing one. Offline-testable."""
+    extra: list[str] = []
+    if not conv.empty and "bundle_type" in conv.columns:
+        seen = {str(b).strip() for b in conv["bundle_type"].dropna() if str(b).strip()}
+        extra = sorted(seen - set(CANONICAL_BUNDLE_TYPES))
+    return CANONICAL_BUNDLE_TYPES + extra
+
+
+def _conv_cols():
+    """(price, carrier, bundle_type, snapshot_date) column letters on the convergent_history sheet."""
+    return (get_column_letter(CONVERGENT_COLUMNS.index("price_brl") + 1),
+            get_column_letter(CONVERGENT_COLUMNS.index("carrier") + 1),
+            get_column_letter(CONVERGENT_COLUMNS.index("bundle_type") + 1),
+            get_column_letter(CONVERGENT_COLUMNS.index("snapshot_date") + 1))
+
+
+def _conv_minifs_day(pc, cc, bc, sc, carrier: str, bundle: str, row: int) -> str:
+    """Cheapest price `carrier` offered for `bundle` ON the EXACT date in $A{row}, live over
+    `convergent_history`. Same locale-safe TEXT-date construction as the mobile matrix (§7): the sheet
+    stores snapshot_date as TEXT (verified), so a date/serial criterion would never match — we rebuild
+    the ISO string from the row's date cell with numeric "00" formats (NOT localized date codes)."""
+    daystr = (f'YEAR($A{row})&"-"&TEXT(MONTH($A{row}),"00")&"-"&TEXT(DAY($A{row}),"00")')
+    return (f'_xlfn.MINIFS(convergent_history!${pc}:${pc},'
+            f'convergent_history!${cc}:${cc},"{carrier}",'
+            f'convergent_history!${bc}:${bc},"{bundle}",'
+            f'convergent_history!${sc}:${sc},{daystr})')
+
+
+def _conv_matrix_value(conv: pd.DataFrame, carrier: str, bundle: str, day_str: str):
+    """The Python value the cell's MINIFS computes — used to BAKE a cached value beside the formula
+    (#21 discipline: this MUST mirror `_conv_minifs_day` exactly). None when the carrier had no offer
+    of that bundle type that day → the cell stays BLANK (an honest gap, never a misleading 0)."""
+    if conv.empty or "bundle_type" not in conv.columns:
+        return None
+    sub = conv[(conv["carrier"] == carrier)
+               & (conv["bundle_type"].astype("string") == bundle)
+               & (conv["snapshot_date"].astype(str) == day_str)]["price_brl"]
+    sub = pd.to_numeric(sub, errors="coerce").dropna()
+    return round(float(sub.min()), 2) if len(sub) else None
+
+
+def _write_convergent_comparison(xl, conv: pd.DataFrame):
+    """`convergent_comparison` (#33) — the combo equivalent of the mobile `comparison` matrix (§7).
+    Rows = one per snapshot_date in `convergent_history` (earliest first, auto-growing); columns =
+    BUNDLE-TYPE groups, each split TIM | Vivo | Claro. Every value cell is a LIVE exact-date MINIFS
+    over `convergent_history`, so the sheet fills itself as the daily job adds snapshots, and the
+    computed values are baked alongside (#21) so the committed file displays in any viewer.
+
+    Why cheapest WITHIN a bundle type rather than cheapest overall: carriers sell very different
+    things under one "combo" banner — a fibre+TV bundle is not a competitor to a fibre+mobile one, and
+    a single "cheapest combo" column would compare unlike with unlike. Returns (worksheet, {coord:
+    value}) — an empty history yields a header-only sheet, never an exception."""
+    ws = xl.book.create_sheet("convergent_comparison")
+    _gridless(ws, TAB_COLORS["convergent_comparison"])
+    groups = convergent_bundle_types(conv)
+    pc, cc, bc, sc = _conv_cols()
+    ncol = 1 + 3 * len(groups)
+
+    HEAD1, HEAD2, FIRST = 1, 2, 3
+    ws.cell(row=HEAD1, column=1, value="Date")
+    ws.merge_cells(start_row=HEAD1, start_column=1, end_row=HEAD2, end_column=1)
+    for g, title in enumerate(groups):
+        c0 = 2 + g * 3
+        ws.merge_cells(start_row=HEAD1, start_column=c0, end_row=HEAD1, end_column=c0 + 2)
+        ws.cell(row=HEAD1, column=c0, value=title)
+        for k, carrier in enumerate(EVOLUTION_CARRIERS):
+            ws.cell(row=HEAD2, column=c0 + k, value=EVOLUTION_DISP[carrier])
+    _house_header(ws, HEAD1, ncol)
+    _house_header(ws, HEAD2, ncol)
+    ws.cell(row=HEAD1, column=1).alignment = Alignment(vertical="center", horizontal="left")
+    for c in range(2, ncol + 1):
+        ws.cell(row=HEAD1, column=c).alignment = Alignment(vertical="center", horizontal="center")
+        ws.cell(row=HEAD2, column=c).alignment = Alignment(vertical="center", horizontal="center")
+
+    values: dict[str, float] = {}
+    r = FIRST
+    for d_str in evolution_dates(conv):                 # one row per snapshot_date, earliest first
+        try:
+            day = date.fromisoformat(str(d_str)[:10])
+        except (ValueError, TypeError):
+            continue
+        dcell = ws.cell(row=r, column=1, value=day)
+        dcell.number_format = "dd-mmm"
+        dcell.font = Font(name=FONT)
+        for g, bundle in enumerate(groups):
+            c0 = 2 + g * 3
+            for k, carrier in enumerate(EVOLUTION_CARRIERS):
+                m = _conv_minifs_day(pc, cc, bc, sc, carrier, bundle, r)
+                cell = ws.cell(row=r, column=c0 + k, value=f'=IFERROR(IF({m}=0,"",{m}),"")')
+                cell.number_format = CURRENCY_FMT
+                cell.font = Font(name=FONT)
+                cell.alignment = RIGHT
+                v = _conv_matrix_value(conv, carrier, bundle, d_str)
+                if v is not None:
+                    values[f"{get_column_letter(c0 + k)}{r}"] = v
+        r += 1
+    last = r - 1
+
+    if last >= FIRST:      # per-bundle-type-BLOCK heatmap: one green→yellow scale over each group's
+        for g in range(len(groups)):     # 3 carrier columns × all date rows (same as the mobile #20)
+            c0 = 2 + g * 3
+            rng = f"{get_column_letter(c0)}{FIRST}:{get_column_letter(c0 + 2)}{last}"
+            ws.conditional_formatting.add(rng, _price_scale_2color())
+
+    note = ws.cell(row=max(last, FIRST) + 2, column=1,
+                   value="Rows = day. Each cell = the CHEAPEST combo that carrier offered of that "
+                         "bundle type on that snapshot_date — a live MINIFS over `convergent_history` "
+                         "matching the EXACT date (locale-safe text date, as in `comparison`). Compared "
+                         "WITHIN a bundle type so the columns are like-for-like (a fibre+TV bundle is "
+                         "not a competitor to a fibre+mobile one). A BLANK cell means that carrier sold "
+                         "no combo of that type that day — an honest gap, not a zero. Bundle type is "
+                         "derived from the offer's service flags; the sheet grows one row per day.")
+    note.font = Font(name=FONT, italic=True, size=9, color="808080")
+    ws.freeze_panes = f"B{FIRST}"
+    ws.column_dimensions["A"].width = 13
+    for c in range(2, ncol + 1):
+        ws.column_dimensions[get_column_letter(c)].width = 12
+    return ws, values
+
+
 # ---- cached-value bake (#21) — so the committed workbook DISPLAYS in any viewer, keeping formulas ------
 _SS_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -923,6 +1078,7 @@ def write_workbook(plans, path: str | Path, run_ts: datetime, convergent=None) -
     cur_cols = (COLUMNS.index("price_brl") + 1, COLUMNS.index("price_promo_brl") + 1)
     num_cols = (COLUMNS.index("data_gb") + 1,)
     conv_written = True                     # flipped by the last-resort guard below (#31)
+    conv_values: dict[str, float] = {}       # convergent_comparison cached values to bake (#33)
 
     with pd.ExcelWriter(path, engine="openpyxl") as xl:
         history.to_excel(xl, sheet_name="history", index=False)
@@ -947,6 +1103,15 @@ def write_workbook(plans, path: str | Path, run_ts: datetime, convergent=None) -
         _write_operator_sheets(xl, latest)   # one tab per carrier (by-operator catalog view)
         try:                                          # combo offers — separate domain, additive (#31)
             _write_convergent_history(xl, conv_history)
+            # …and its evolution matrix (#33). Guarded SEPARATELY so a matrix problem cannot cost us
+            # the collected history sheet, and so `conv_values` stays empty on failure — otherwise the
+            # fail-loud bake check below would abort the whole (mobile) write over a side-domain bug.
+            try:
+                _, conv_values = _write_convergent_comparison(xl, conv_history)
+            except Exception as e:
+                conv_values = {}
+                print(f"convergent: comparison sheet failed ({type(e).__name__}: {e}) - "
+                      f"history kept, matrix skipped")
         except Exception as e:                        # never let the side-domain break the mobile write
             # Last-resort guard. The sheet is now absent from THIS workbook, so the accumulated
             # convergent rows will not be re-readable next run — say so LOUDLY rather than reporting
@@ -964,7 +1129,8 @@ def write_workbook(plans, path: str | Path, run_ts: datetime, convergent=None) -
     # openpyxl writes formulas WITHOUT cached values, so non-recalc viewers (GitHub preview, Google Sheets,
     # mobile, Excel Protected View) show blank. Bake the computed values into the formula cells — keeping
     # the live formulas — so the committed workbook displays everywhere. (#21, CONTEXT §5/§7)
-    value_map = {"comparison": comp_values, "summary": summ_values}
+    value_map = {"comparison": comp_values, "summary": summ_values,
+                 "convergent_comparison": conv_values}                                    # (#33)
     baked = _bake_cached_values(path, value_map)
     expected = sum(len(v) for v in value_map.values())
     # Fail LOUDLY on a 0/partial bake (e.g. a future openpyxl serialization change defeating the injector)
