@@ -71,16 +71,36 @@ def _clean(text: str | None) -> str:
 
 
 def _price_from(text: str | None) -> float | None:
-    """'170' → 170.0 ; 'R$ 1.200' → 1200.0 ; '24,99' → 24.99."""
+    """Parse a BRL price, deciding the separator roles BY PATTERN rather than by assumption (#36).
+
+    The old version stripped every ``.`` as a thousands separator, so a **dot-decimal** value —
+    which this page really can serve, e.g. ``data-original-price="160.00"`` — became **16000**: a
+    silent 100× error on a price that feeds the convergent matrix. (#35 audit, blocker.)
+
+    The rule, applied to the last separator present:
+      * ``1.200,00`` / ``24,99``  → comma is the decimal mark, dots are thousands  → 1200.0 / 24.99
+      * ``1,200.00`` / ``160.00`` → dot is the decimal mark, commas are thousands  → 1200.0 / 160.0
+      * a LONE separator followed by exactly 3 digits and nothing else (``1.200``, ``1,200``) is a
+        thousands group, not a decimal → 1200.0  (BRL is quoted with 2 decimals, never 3)
+      * ``170`` → 170.0
+    Returns None when no digits are present."""
     if not text:
         return None
-    m = re.search(r"\d[\d.]*(?:,\d{2})?", text)
+    m = re.search(r"\d[\d.,]*", str(text))
     if not m:
         return None
-    raw = m.group(0)
-    if "," in raw:
-        return float(raw.replace(".", "").replace(",", "."))
-    return float(raw.replace(".", ""))
+    raw = m.group(0).rstrip(".,")
+    if not raw:
+        return None
+    last_dot, last_comma = raw.rfind("."), raw.rfind(",")
+    if last_dot == -1 and last_comma == -1:
+        return float(raw)
+    sep, pos = (".", last_dot) if last_dot > last_comma else (",", last_comma)
+    tail = raw[pos + 1:]
+    if len(tail) == 3 and raw.count(sep) == 1 and (last_dot == -1 or last_comma == -1):
+        return float(raw.replace(sep, ""))            # "1.200" / "1,200" → a thousands group
+    other = "," if sep == "." else "."
+    return float(raw.replace(other, "").replace(sep, "."))
 
 
 def _speed_mbps(text: str) -> int | None:

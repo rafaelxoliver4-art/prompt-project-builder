@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from mobile_tracker.adapters.claro_convergent import (build_claro_offers, catalog_url,
                                                       next_data, parse_claro_multi_grid)
@@ -104,6 +105,33 @@ def test_vivo_struck_through_price_becomes_the_promo():
     o = parse_vivo_total_html(html, _vivo_target())[0]
     assert o.price_brl == 160.0 and o.price_promo_brl == 130.0
     assert "desconto" in o.price_note
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("1.200,00", 1200.00),      # pt-BR: dot = thousands, comma = decimal
+    ("160,00", 160.00),
+    ("160.00", 160.00),         # dot-DECIMAL — the #35 blocker: this used to parse as 16000 (100x)
+    ("1,200.00", 1200.00),      # en-US: comma = thousands, dot = decimal
+    ("89,99", 89.99),
+    ("170", 170.0),
+    ("1.200", 1200.0),          # a lone separator + exactly 3 digits is a thousands group
+    ("R$ 1.329,05", 1329.05),
+    ("", None),
+    ("sem preço", None),
+])
+def test_price_from_handles_both_brl_conventions(raw, expected):
+    """#36 (P0): `_price_from` decides the separator roles BY PATTERN. The old version stripped every
+    '.' as a thousands separator, so a dot-decimal `data-original-price="160.00"` became R$16 000 —
+    a silent 100x error feeding the convergent matrix."""
+    from mobile_tracker.adapters.vivo_convergent import _price_from
+    assert _price_from(raw) == expected
+
+
+def test_vivo_combo_prices_unchanged_after_the_parser_fix():
+    """The real captured grid must parse identically to before the fix (no 100x, no regression)."""
+    prices = sorted(o.price_brl for o in _vivo_offers())
+    assert prices == [160.0, 170.0, 190.0, 1200.0]        # the 4 cards kept in the fixture
+    assert all(p < 2000 for p in prices)                   # nothing inflated by a factor of 100
 
 
 def test_vivo_sp_label_detection():

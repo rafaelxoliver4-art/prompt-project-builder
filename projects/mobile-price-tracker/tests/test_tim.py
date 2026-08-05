@@ -93,20 +93,13 @@ def _fit_target() -> Target:
                   state="SP", url="https://www.tim.com.br/sp/para-voce/planos/controle")
 
 
-def test_fit_parses_both_versions():
-    # #28: TIM Controle Fit is TEXT on the controle page (anchor #price-fit), NOT in the ofertas JSON.
-    # Anual = 30GB, 12x R$30 no cartão, 12-mo permanence; Mensal = 20GB, R$35, no commitment. plan_id =
-    # the stable etiqueta code (survives Drupal nid rotations).
-    plans = parse_tim_html(_FIT_HTML, _fit_target(), raw_ref="fx")
-    assert len(plans) == 2
-    by = {p.plan_name: p for p in plans}
-    anual = by["TIM Controle Fit Anual"]
-    assert (anual.price_brl, anual.data_gb, anual.loyalty_months) == (30.0, 30.0, 12)
-    assert anual.payment_method == "credit_card" and anual.plan_id == "tim:TIM202600000271"
-    mensal = by["TIM Controle Fit Mensal"]
-    assert (mensal.price_brl, mensal.data_gb, mensal.loyalty_months) == (35.0, 20.0, None)
-    assert mensal.payment_method is None and mensal.plan_id == "tim:TIM202600000270"
-    assert all(p.category == "fit" and p.is_valid() for p in plans)
+# NOTE (#36): the two #28 tests that pinned the OLD `#price-fit` markup — a single
+# `modal-fit-anual` / `modal-fit-mensal` pair with no region or version suffix — were RETIRED here.
+# TIM rebuilt the section on ~2026-08-03 into 2 regional blocks x 2 versions x 2 plan types, so that
+# shape no longer exists on the page and a test asserting it pins a fiction. Both behaviours they
+# guarded (every served tier parsed; an etiqueta code never bleeding in from an adjacent modal) are
+# now covered in `tests/test_tim_fit.py` against a fixture derived from the REAL rebuilt capture.
+# `_FIT_HTML` below is kept only for the price-helper and no-section tests.
 
 
 def test_fit_returns_empty_without_section():
@@ -122,21 +115,6 @@ def test_fit_price_dot_or_comma_decimal():
     assert _fit_price("34,99") == 34.99
     assert _fit_price("34.99") == 34.99
     assert _fit_price("35.9") == 35.9
-
-
-def test_fit_code_bounded_to_its_modal_no_sibling_bleed():
-    # #28 review fix: the two fit modals are adjacent — when THIS modal's etiqueta link is missing, the
-    # code search must NOT bleed into the sibling modal (both plans would collide on one plan_id and
-    # _merge_history would silently drop a row). The per-version fallback id must fire instead.
-    html = _FIT_HTML.replace(
-        '<div id="modal-fit-anual"><p><a href="x.pdf">Etiqueta padrão - TIM202600000271 - '
-        'com prazo de permanência</a></p></div>',
-        '<div id="modal-fit-anual"><p>etiqueta em breve</p></div>')   # anual code REMOVED
-    plans = parse_tim_html(html, _fit_target())
-    by = {p.plan_name: p.plan_id for p in plans}
-    assert by["TIM Controle Fit Anual"] == "tim:fit-anual"            # fallback, NOT the mensal code
-    assert by["TIM Controle Fit Mensal"] == "tim:TIM202600000270"     # sibling untouched
-    assert len(set(by.values())) == 2                                 # ids never collide
 
 
 def test_fit_category_does_not_disturb_control_parse():

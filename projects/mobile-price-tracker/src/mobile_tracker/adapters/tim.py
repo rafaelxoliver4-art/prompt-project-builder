@@ -121,20 +121,36 @@ def _iter_ofertas(settings: dict) -> list[dict]:
     return out
 
 
-# --- TIM Controle Fit (#28) — TIM's digital line (Digital peer of Vivo Lite / Claro Flex) -------------
-# RECON (verified live SP, 2026-07-13): the Fit plans are NOT in the drupal-settings `ofertas` JSON.
-# They live ON the controle page as a server-rendered marketing section (anchor id="price-fit") with two
-# versions in tabs — "Plano anual" ("Tenha 30GB por 12x R$30/mês", credit card, COM prazo de permanência)
-# and "Plano mensal" ("Tenha 20GB por R$35/mês", SEM prazo de permanência). Each version's benefits modal
-# (id="modal-fit-anual"/"modal-fit-mensal") carries a STABLE etiqueta offer code ("Etiqueta padrão -
-# TIM202600000271/270") — used as the plan_id (carrier-native, non-price-derived, survives nid rotations).
-_FIT_ANUAL = re.compile(
-    r"Plano\s+anual\b.{0,300}?Tenha\s*(\d+)\s*GB\s*por\s*12x\s*R\$\s*(\d+(?:[.,]\d{1,2})?)\s*/\s*m[êe]s",
-    re.S | re.I)
-_FIT_MENSAL = re.compile(
-    r"Plano\s+mensal\b.{0,300}?Tenha\s*(\d+)\s*GB\s*por\s*R\$\s*(\d+(?:[.,]\d{1,2})?)\s*/\s*m[êe]s",
-    re.S | re.I)
+# --- TIM Controle Fit — TIM's digital line (Digital peer of Vivo Lite / Claro Flex) -------------------
+# The Fit plans are NOT in the drupal-settings `ofertas` JSON; they live ON the controle page as a
+# server-rendered marketing section (anchor id="price-fit").
+#
+# ⚠️ REBUILT BY TIM ~2026-08-03 — the #35 audit caught the fallout (see docs/source_audit_2026-08.md).
+# The section is now **2 regional blocks × 2 tier-versions × 2 plan types = 8 cards**, each card linked
+# to its own benefits modal by `data-modal-open="modal-fit-<anual|mensal>-<version>-<regions>"`, e.g.
+# `modal-fit-anual-2.0-sp-sc-rn-ce` and `modal-fit-anual-2.0-demais-ufs`. The old code searched for the
+# literal ids `modal-fit-anual` / `modal-fit-mensal` (now absent → the etiqueta plan_id silently
+# degraded to a name slug) and took the FIRST "Tenha …" phrase in the whole section (→ it captured a
+# different, newly-inserted "1.0" offer). Between them those two bugs produced this project's only
+# price alert, which was FALSE. (#36)
+#
+# The parse is now driven by `data-modal-open`, which is the authoritative card→modal link:
+#   * REGION GATE — the modal id's trailing region list. `…-sp-sc-rn-ce` serves SP/SC/RN/CE;
+#     `…-demais-ufs` serves every other state. NOTE: the Fit section carries NO `field_regioes` (that
+#     field only exists on `ofertas` JSON nodes), so the modal-id region list is the only real gate the
+#     page offers — `rel=canonical` is state-less and DOM order is not a gate at all.
+#   * plan_id — the etiqueta code inside THAT card's own modal slice (`TIM2026…`), carrier-native and
+#     never price-derived. The four SP cards carry four distinct etiquetas.
+#   * loyalty — see `_FIT_TIERS` below; the page's own "sem prazo de permanência" wording is recorded
+#     in the note because it disagrees with how we model the annual plan (documented, not silently
+#     resolved).
+_FIT_MODAL = re.compile(r'data-modal-open="(modal-fit-(anual|mensal)-([\d.]+)-([a-z-]+))"', re.I)
+_FIT_OFFER = re.compile(
+    r"Tenha\s*(\d+)\s*GB\s*por\s*(12x\s*)?R\$\s*(\d+(?:[.,]\d{1,2})?)\s*/\s*m[êe]s", re.I)
+_FIT_NAME = re.compile(r"(TIM\s+Controle\s+Fit\s+(?:Anual|Mensal)\s*[\d.]*)", re.I)
 _FIT_CODE = re.compile(r"TIM\d{12,}")
+_FIT_MODAL_PRICE = re.compile(r"R\$\s*(\d+(?:[.,]\d{1,2})?)\s*(?:por\s*m[êe]s|/\s*m[êe]s)", re.I)
+_DEMAIS = "demais-ufs"
 
 
 def _fit_price(s: str) -> float:
@@ -144,60 +160,121 @@ def _fit_price(s: str) -> float:
     return float(s.replace(",", "."))
 
 
-def _fit_code(html: str, modal_id: str) -> str | None:
-    """The stable etiqueta offer code inside a Fit benefits modal — searched STRICTLY within that
-    modal's slice, bounded at the NEXT ``id="modal-`` (the two fit modals are adjacent, so an unbounded
-    window would steal the sibling's code when this modal's etiqueta link is missing — the fallback id
-    must fire instead). (#28, adversarial-review fix)"""
-    start = html.find(f'id="{modal_id}"')
+def _fit_serves_state(regions: str, state: str) -> bool:
+    """Does a Fit modal's region list serve `state`? ``sp-sc-rn-ce`` → {sp, sc, rn, ce}; the catch-all
+    ``demais-ufs`` serves any state NOT named by a sibling block. Callers pass the sibling region lists
+    so the catch-all can be resolved correctly. (#36)"""
+    return state.lower() in {t for t in regions.lower().split("-") if t}
+
+
+def _fit_code_in(section: str, modal_id: str) -> str | None:
+    """The etiqueta code inside THIS card's modal slice, bounded by the next ``id="modal-`` so an
+    adjacent modal's code can never bleed in (#28 review; #36 keeps the bound, new id pattern)."""
+    start = section.find(f'id="{modal_id}"')
     if start == -1:
         return None
-    end = html.find('id="modal-', start + 1)
-    m = _FIT_CODE.search(html[start:end if end != -1 else start + 80_000])
+    end = section.find('id="modal-', start + 1)
+    m = _FIT_CODE.search(section[start:end if end != -1 else start + 80_000])
     return m.group(0) if m else None
 
 
+def _fit_modal_price(section: str, modal_id: str) -> float | None:
+    """The price stated INSIDE the card's own modal — used only to cross-check the card headline and
+    flag a disagreement in the note (never to silently override what the page shows). (#36)"""
+    start = section.find(f'id="{modal_id}"')
+    if start == -1:
+        return None
+    end = section.find('id="modal-', start + 1)
+    text = " ".join(HTMLParser(section[start:end if end != -1 else start + 80_000])
+                    .text(separator=" ", strip=True).split())
+    m = _FIT_MODAL_PRICE.search(text)
+    return _fit_price(m.group(1)) if m else None
+
+
 def parse_tim_fit_html(html: str, target: Target, raw_ref: str | None = None) -> list[Plan]:
-    """Pure mapping: the controle page's #price-fit SECTION → the two TIM Controle Fit plans (#28).
-    Text-parsed (selectolax text + anchored regex), NOT the ofertas JSON — the Fit cards aren't in it.
-    Entry-level policy: the ANUAL version carries loyalty_months=12 (12-month permanence, 12x no cartão →
-    payment_method="credit_card"), so the Digital matrix pick — no-commitment plans only — reads the
-    MENSAL version (loyalty blank). Both stay in history. Returns [] if the section is absent (site
-    restructure) — never a crash; the FETCH path prints a loud warning on an empty fit parse, since
-    main's zero-count guard is per-CARRIER only and TIM's other categories would mask the loss."""
+    """Pure mapping: the controle page's #price-fit SECTION → the TIM Controle Fit plans **for this
+    target's state** (#28, rebuilt in #36). Text-parsed, NOT the ofertas JSON — the Fit cards aren't in
+    it. Returns [] if the section is absent (site restructure) — never a crash; the FETCH path prints a
+    loud warning on an empty fit parse, since main's zero-count guard is per-CARRIER only and TIM's
+    other categories would mask the loss.
+
+    Each card is anchored on its own ``data-modal-open`` link, so a card can only ever be paired with
+    ITS OWN price, name and etiqueta — the #36 fix for the first-match-wins bug that captured a
+    different tier's price. All tier-versions served to the state are captured (SP currently has 4:
+    Anual 1.0/2.0 and Mensal 1.0/2.0).
+
+    Entry-level policy: the ANUAL versions are billed **12x on a credit card**, so they carry
+    ``loyalty_months=12`` + ``payment_method="credit_card"`` and the Digital matrix pick — no-commitment
+    plans only — reads the MENSAL versions. ⚠️ The page itself labels EVERY Fit etiqueta (annual ones
+    included) *"sem prazo de permanência"*; we model the 12x annual commitment the same way Vivo's
+    "Plano anual 12x no cartão" is modelled (#26) so the two carriers stay comparable, and we record
+    the carrier's own wording in the note rather than silently discarding it."""
     start = html.find('id="price-fit"')
     if start == -1:
         return []
     section = html[start:]                                   # through the fit modals at the page tail
-    text = HTMLParser(section).text(separator=" ", strip=True)
+
+    cards = list(_FIT_MODAL.finditer(section))
+    if not cards:
+        return []
+    # REGION GATE: prefer a block that names this state; otherwise the "demais-ufs" catch-all. Never
+    # fall back to "all cards" — an ungated parse silently mixes another region's prices into SP.
+    state = (target.state or "").lower()
+    regions = {m.group(4).lower() for m in cards}
+    if any(_fit_serves_state(r, state) for r in regions):
+        wanted = {r for r in regions if _fit_serves_state(r, state)}
+    elif _DEMAIS in regions:
+        wanted = {_DEMAIS}
+    else:
+        return []
 
     plans: list[Plan] = []
     seen: set[str] = set()
-    versions = [
-        # (label, regex, loyalty_months, payment, modal id with the stable code, note)
-        ("Anual", _FIT_ANUAL, 12, "credit_card", "modal-fit-anual",
-         "plano anual 12x no cartão de crédito; prazo de permanência 12m"),
-        ("Mensal", _FIT_MENSAL, None, None, "modal-fit-mensal",
-         "plano mensal, sem prazo de permanência"),
-    ]
-    for label, rx, loyalty, payment, modal_id, note in versions:
-        m = rx.search(text)
-        if not m:
+    for i, m in enumerate(cards):
+        modal_id, kind, version, region = m.group(1), m.group(2).lower(), m.group(3), m.group(4).lower()
+        if region not in wanted:
             continue
-        code = _fit_code(html, modal_id)
-        plan_id = f"tim:{code}" if code else f"tim:fit-{label.lower()}"
-        if plan_id in seen:              # sibling-code bleed guard: never collide ids (#28 review)
-            plan_id = f"tim:fit-{label.lower()}"
+        # The card's own copy is the text immediately BEFORE its modal link, bounded by the previous
+        # card's link so a neighbouring card's phrase can never be picked up.
+        lo = cards[i - 1].end() if i else 0
+        blob = " ".join(HTMLParser(section[lo:m.start()]).text(separator=" ", strip=True).split())
+        offer = None
+        for offer in _FIT_OFFER.finditer(blob):
+            pass                                    # the LAST phrase before the link is this card's
+        if offer is None:
+            continue
+        names = _FIT_NAME.findall(blob)
+        label = kind.capitalize()
+        name = " ".join(names[-1].split()) if names else f"TIM Controle Fit {label} {version}"
+
+        code = _fit_code_in(section, modal_id)
+        plan_id = f"tim:{code}" if code else f"tim:fit-{kind}-{version}-{region}"
+        if plan_id in seen:                          # never collide (etiquetas repeat across regions)
+            plan_id = f"tim:fit-{kind}-{version}-{region}"
         seen.add(plan_id)
+
+        price = _fit_price(offer.group(3))
+        installments = bool(offer.group(2))          # "12x" present → the annual, credit-card plan
+        note = ("plano anual 12x no cartão de crédito" if installments
+                else "plano mensal, sem prazo de permanência")
+        note += "; a etiqueta TIM informa 'sem prazo de permanência'"
+        # Cross-check against the card's OWN modal and REPORT a disagreement instead of picking one
+        # silently (GOVERNANCE: never invent a number). SP's Mensal 1.0 card reads R$20 while its modal
+        # still reads R$35 — the card is what an SP visitor is shown, so the card wins and we say so.
+        mp = _fit_modal_price(section, modal_id)
+        if mp is not None and abs(mp - price) > 0.005:
+            note += (f"; ATENÇÃO: o card exibe R$ {price:g} mas o modal da oferta informa R$ {mp:g} "
+                     f"(registrado o valor do card)")
+
         plans.append(BaseAdapter.make_plan(
             target,
-            plan_name=f"TIM Controle Fit {label}",
+            plan_name=name,
             plan_id=plan_id,
-            price_brl=_fit_price(m.group(2)),
+            price_brl=price,
             price_note=note,
-            data_gb=float(m.group(1)),
-            loyalty_months=loyalty,
-            payment_method=payment,
+            data_gb=float(offer.group(1)),
+            loyalty_months=12 if installments else None,
+            payment_method="credit_card" if installments else None,
             raw_ref=raw_ref,
         ))
     return plans
