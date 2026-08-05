@@ -48,7 +48,7 @@ from selectolax.parser import HTMLParser
 
 from ..config import Target
 from ..convergent import ConvergentOffer
-from .base import BaseAdapter
+from .base import BaseAdapter, fetch_with_retry
 
 CATALOG_URL = "https://www.claro.com.br/api/catalog"
 _GB = re.compile(r"(\d+)\s*GB", re.I)
@@ -241,19 +241,18 @@ class ClaroConvergentAdapter(BaseAdapter):
               f"{target.state} (ghosts, excluded)")
         return offers
 
-    @staticmethod
-    def _get(url: str, headers: dict, timeout) -> str:
-        last_err: Exception | None = None
-        for attempt in range(2):       # one retry on a transient blip; a real block is reported as-is
-            try:
-                resp = httpx.get(url, headers=headers, timeout=timeout, follow_redirects=True)
-                resp.raise_for_status()
-                return resp.text
-            except httpx.HTTPError as e:
-                last_err = e
-                if attempt == 0:
-                    time.sleep(2)
-        raise RuntimeError(f"Claro convergent {url}: request failed: {last_err}")
+    def _get(self, url: str, headers: dict, timeout) -> str:
+        # Transient blip → retry; a real block is reported as-is, never retried (#37/E).
+        def _once() -> str:
+            resp = httpx.get(url, headers=headers, timeout=timeout, follow_redirects=True)
+            resp.raise_for_status()
+            return resp.text
+
+        retries = int(self.settings.sanity.get("fetch_retries", 2))
+        try:
+            return fetch_with_retry(_once, retries)
+        except httpx.HTTPError as e:
+            raise RuntimeError(f"Claro convergent {url}: request failed: {e}") from e
 
     def _save_raw(self, target: Target, body: str, suffix: str) -> str:
         d = Path(self.settings.raw_capture_dir)

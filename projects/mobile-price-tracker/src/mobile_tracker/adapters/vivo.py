@@ -26,7 +26,7 @@ from pathlib import Path
 
 from selectolax.parser import HTMLParser
 
-from .base import BaseAdapter, slugify
+from .base import BaseAdapter, slugify, fetch_with_retry
 from ..config import Target
 from ..models import Plan
 
@@ -55,6 +55,51 @@ def _price_from(text: str | None) -> float | None:
     return float(raw.replace(".", ""))
 
 
+def _addon_gb(card) -> float | None:
+    """The DATA the pre-checked add-on contributes, from the switch's own text
+    ("+ 10 GB para suas redes sociais e vídeo por R$ 5") — None when it can't be read.
+
+    Needed because `.unique-card__header-benefit` reports the add-on-INCLUSIVE allowance: the same
+    card family reads "46 GB" with the switch unchecked and "61 GB" with it checked (51 base + 10).
+    Storing the base PRICE next to the inclusive GB would describe a plan that isn't sold."""
+    sw = card.css_first('[data-controller="switchUnique"]')
+    if sw is None:
+        return None
+    # PRIMARY: the switch's own machine-readable amount, base64 ("MTA=" -> "10"), alongside
+    # data-price-bonus ("NQ==" -> "5"). Preferred over the label because it can't be reworded.
+    raw = sw.attributes.get("data-gb-bonus")
+    if raw:
+        try:
+            import base64
+            return float(re.sub(r"[^\d.]", "", base64.b64decode(raw).decode("utf-8", "ignore")))
+        except Exception:                                 # malformed attr -> fall through to the label
+            pass
+    m = re.search(r"\+\s*(\d+)\s*GB", sw.text() or "", re.I)
+    return float(m.group(1)) if m else None
+
+
+def _addon_base_price(card, price_el, shown: float | None) -> float | None:
+    """The plan's price WITHOUT a pre-selected optional add-on, or None when no such add-on is on
+    this card (#37).
+
+    Vivo cards carry an add-on switch (``[data-controller="switchUnique"]``) whose
+    ``data-startdisabled`` is ``"checked"`` when the extra is pre-selected. In that state the visible
+    ``.total-card-price-value`` text is base+add-on while ``data-original-price`` holds the plan's own
+    price. We only trust that attribute when the switch really is pre-checked AND the attribute is
+    *lower* than the displayed figure — so a page without the add-on, or any other reason the two
+    differ, falls through to the ordinary promo handling instead of silently reinterpreting a price."""
+    if price_el is None or shown is None:
+        return None
+    sw = card.css_first('[data-controller="switchUnique"]')
+    pre_checked = sw is not None and str(sw.attributes.get("data-startdisabled", "")).lower() == "checked"
+    if not pre_checked:
+        pre_checked = any("checked" in (i.attributes or {}) for i in card.css('input[type="checkbox"]'))
+    if not pre_checked:
+        return None
+    base = _price_from(price_el.attributes.get("data-original-price"))
+    return base if (base is not None and base < shown) else None
+
+
 def parse_vivo_html(html: str, target: Target, raw_ref: str | None = None) -> list[Plan]:
     """Pure mapping: rendered Vivo HTML → list[Plan]. selectolax only, no network — unit-testable."""
     tree = HTMLParser(html)
@@ -80,13 +125,22 @@ def parse_vivo_html(html: str, target: Target, raw_ref: str | None = None) -> li
             dm = _DAYS.search(card.text(separator=" ", strip=True) or "")
             validity_days = int(dm.group(1)) if dm else None
 
-        # plan_id = native offer code + data allowance. Prepaid tiers share ONE page-level code
-        # (e.g. VIV…22379), so the data amount (non-price) disambiguates them; for postpaid the code
-        # is already unique per card and the suffix is harmless.
+        # plan_id — STABLE, carrier-native, and free of any parsed GB or price (#37).
+        # It used to be `{code}-{data_gb}gb`, which made the id depend on a PARSED, VOLATILE number:
+        # Vivo Controle cards carry a pre-checked "+10 GB" add-on whose render varies, so the same
+        # offer alternated between `…-61gb` and `…-51gb`, the id-match failed, and the alert emitted
+        # ±5 % lines that reversed the next day — 79 % of ALL alert noise (#35 audit).
+        # The VIV code is unique PER CARD on control / lite / postpaid (verified 2026-08-05: 8/3/11
+        # distinct codes for 8/3/11 cards), so it stands alone. Only PREPAID shares one page-level
+        # code across its tiers; there the tier's defining attribute is the recarga VALIDITY (15/17/
+        # 22/30 d) — an attribute, not a price and not the add-on-inflated GB.
         code = _VIV.search(card.html or "") or _SELF.search(card.html or "")
         base = code.group(0) if code else slugify(name)
-        gbtok = f"{int(data_gb)}gb" if data_gb else "x"
-        plan_id = f"vivo:{base}-{gbtok}"
+        if target.category == "prepaid":
+            tok = f"{int(validity_days)}d" if validity_days else slugify(name)
+            plan_id = f"vivo:{base}-{tok}"
+        else:
+            plan_id = f"vivo:{base}"
 
         loyalty_months = None
         if target.category == "lite":
@@ -103,13 +157,36 @@ def parse_vivo_html(html: str, target: Target, raw_ref: str | None = None) -> li
             else:
                 price_brl, price_promo, note = price, None, None
         else:
-            # promo: a struck-through original price in .unique-card__price-old (hidden when no promo)
-            old_el = card.css_first(".unique-card__price-old")
-            old = _price_from(old_el.text()) if old_el is not None else None
-            if old and old != price:
-                price_brl, price_promo, note = old, price, "oferta com desconto"
+            # PRE-CHECKED PAID ADD-ON (#37): Vivo Controle cards ship a "+ 10 GB para suas redes
+            # sociais … R$ 5" switch that is ALREADY selected, so `.total-card-price-value` shows
+            # base+add-on (80 where the plan is 75; also 90/85, 95/90, 110/105) while the plan's own
+            # price sits in `data-original-price`. The #35 audit found 7 of 8 Controle headlines were
+            # therefore wrong. The HEADLINE is the plan without the optional add-on; the
+            # add-on-inclusive figure is kept in the note, never as the price.
+            # (This is the mirror image of `lite` above, where the displayed text is the value we want
+            # and `data-original-price` is the loyalty price — hence the category split.)
+            addon = _addon_base_price(card, price_el, price)
+            if addon is not None:
+                price_brl, price_promo = addon, None
+                note = (f"preço-base do plano; a tela exibia R$ {price:g} com o adicional "
+                        f"pré-selecionado (+R$ {price - addon:g}/mês, opcional)")
+                # ⚠️ The GB must come off with the price. `.unique-card__header-benefit` reports the
+                # add-on-INCLUSIVE allowance (the same card family reads 46 GB unchecked and 61 GB
+                # checked = 51 + 10), so keeping 61 next to the base R$75 would describe a plan Vivo
+                # does not sell — and would silently corrupt any future R$/GB value lens. Only
+                # subtract when both numbers are readable and the result stays positive.
+                gb_extra = _addon_gb(card)
+                if gb_extra and data_gb and data_gb > gb_extra:
+                    note += f"; {data_gb:g} GB na tela incluem +{gb_extra:g} GB do adicional"
+                    data_gb = data_gb - gb_extra
             else:
-                price_brl, price_promo, note = price, None, None
+                # promo: a struck-through original price in .unique-card__price-old (hidden when none)
+                old_el = card.css_first(".unique-card__price-old")
+                old = _price_from(old_el.text()) if old_el is not None else None
+                if old and old != price:
+                    price_brl, price_promo, note = old, price, "oferta com desconto"
+                else:
+                    price_brl, price_promo, note = price, None, None
 
         switch = card.css_first(".unique-card__switch-list")
         data_note = _clean(switch.text()) if switch is not None else None
@@ -178,6 +255,12 @@ class VivoAdapter(BaseAdapter):
         return plans
 
     def _render(self, url: str, category: str | None = None) -> str:
+        # Retry a TRANSIENT network blip (ERR_NETWORK_CHANGED / timeout) a couple of times; a real
+        # block is NOT transient and is surfaced immediately (no retry-spam — GOVERNANCE §3).
+        retries = int(self.settings.sanity.get("fetch_retries", 2))
+        return fetch_with_retry(lambda: self._render_once(url, category), retries)
+
+    def _render_once(self, url: str, category: str | None = None) -> str:
         # Imported lazily so the module (and the pure parser) import fine without a browser.
         from playwright.sync_api import sync_playwright
 

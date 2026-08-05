@@ -57,7 +57,12 @@ jobs:
         # NOTE: main.py exits non-zero (alerts) if any carrier yields zero plans — a blocked carrier
         # fails the job here, so the commit step below is skipped (no fake/partial commit; GOVERNANCE §6).
 
+      # ⚠️ NEVER commit a demo run. `--demo` writes the adapters' HARDCODED SAMPLE prices to the same
+      # workbook path, and every output guard is skipped in demo mode — so a `mode: demo` dispatch
+      # would otherwise commit fabricated numbers into the append-only history as if they were real
+      # (GOVERNANCE: never fabricate a value). Demo is for proving the pipeline, never for data.
       - name: Commit daily snapshot
+        if: ${{ (github.event.inputs.mode || 'live') == 'live' }}
         working-directory: .
         run: |
           git config user.name  "mobile-price-tracker[bot]"
@@ -71,6 +76,7 @@ jobs:
           fi
 
       - name: Weekly backup (Mondays, UTC)
+        if: ${{ (github.event.inputs.mode || 'live') == 'live' }}   # same reason as above
         working-directory: .
         run: |
           if [ "$(date -u +%u)" = "1" ]; then

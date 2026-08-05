@@ -52,7 +52,7 @@ from pathlib import Path
 
 from selectolax.parser import HTMLParser
 
-from .base import BaseAdapter, slugify
+from .base import BaseAdapter, slugify, fetch_with_retry
 from ..config import Target
 from ..convergent import ConvergentOffer
 
@@ -247,6 +247,11 @@ class VivoConvergentAdapter(BaseAdapter):
         return parse_vivo_total_html(html, target, raw_ref=raw_ref)
 
     def _render(self, url: str) -> str:
+        # Retry a TRANSIENT browser/network blip; a real block is surfaced at once (#37/E, GOVERNANCE §3).
+        retries = int(self.settings.sanity.get("fetch_retries", 2))
+        return fetch_with_retry(lambda: self._render_once(url), retries)
+
+    def _render_once(self, url: str) -> str:
         from playwright.sync_api import sync_playwright     # lazy: the parser imports without a browser
 
         ua = self.cfg.get("user_agent", "")

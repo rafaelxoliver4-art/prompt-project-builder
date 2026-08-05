@@ -31,7 +31,7 @@ from pathlib import Path
 import httpx
 from selectolax.parser import HTMLParser
 
-from .base import BaseAdapter, slugify
+from .base import BaseAdapter, slugify, fetch_with_retry
 from ..config import Target
 from ..models import Plan
 
@@ -345,18 +345,17 @@ class TimAdapter(BaseAdapter):
         headers = {"User-Agent": self.cfg.get("user_agent", "")}
         timeout = self.cfg.get("request_timeout_seconds", 30)
 
-        last_err: Exception | None = None
-        for attempt in range(2):  # one retry
-            try:
-                resp = httpx.get(target.url, headers=headers, timeout=timeout, follow_redirects=True)
-                resp.raise_for_status()
-                break
-            except httpx.HTTPError as e:
-                last_err = e
-                if attempt == 0:
-                    time.sleep(2)
-        else:
-            raise RuntimeError(f"TIM {target.url}: request failed: {last_err}")
+        # Transient blip → retry; block/4xx/CAPTCHA → surfaced immediately, never retried (#37/E).
+        def _get():
+            resp = httpx.get(target.url, headers=headers, timeout=timeout, follow_redirects=True)
+            resp.raise_for_status()
+            return resp
+
+        retries = int(self.settings.sanity.get("fetch_retries", 2))
+        try:
+            resp = fetch_with_retry(_get, retries)
+        except httpx.HTTPError as e:
+            raise RuntimeError(f"TIM {target.url}: request failed: {e}") from e
 
         raw_ref = self._save_raw(target, resp.text)
         plans = parse_tim_html(resp.text, target, raw_ref=raw_ref)

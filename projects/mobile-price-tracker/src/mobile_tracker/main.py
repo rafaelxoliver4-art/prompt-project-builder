@@ -17,6 +17,7 @@ import argparse
 import sys
 from datetime import datetime
 
+from . import alerts as alerts_mod
 from . import config
 from .adapters import ADAPTERS
 from .excel_writer import write_workbook
@@ -27,6 +28,23 @@ def run(demo: bool = False, only: str | None = None) -> int:
     settings = config.load()
     run_ts = datetime.now()
     targets = [t for t in settings.targets() if (only is None or t.carrier == only)]
+
+    # STALENESS CHECK (#37/F2) — the gap the sanity guardrail cannot cover: sanity only validates data
+    # when the job RUNS, so a job that fails or never fires is completely silent. (On 2026-08-04 the
+    # scheduled run died in the test step BEFORE scraping and that day's snapshot was lost with no
+    # notification.) The first run that does fire therefore reports how stale the history had become
+    # and which dates are missing. Informational only — fully guarded, never blocks.
+    if not demo:
+        try:
+            msg = alerts_mod.check_staleness(settings.output_xlsx,
+                                             int(settings.sanity.get("max_snapshot_age_days", 2)))
+            if msg:
+                print(f"STALE DATA: {msg}", file=sys.stderr)
+                subj, body = alerts_mod.format_staleness_email(msg, run_ts.date().isoformat())
+                sent = alerts_mod.send_alert_email(settings.alerts, subj, body)
+                print(f"alerts: stale-data email {'sent' if sent else 'not sent'}", file=sys.stderr)
+        except Exception as e:
+            print(f"alerts: staleness check error ({type(e).__name__}: {e}) - continuing", file=sys.stderr)
 
     plans: list[Plan] = []
     per_carrier: dict[str, int] = {}
@@ -63,6 +81,7 @@ def run(demo: bool = False, only: str | None = None) -> int:
     # NOTE: passing an empty list to write_workbook PRESERVES the existing convergent history — the
     # sheet is always re-read and re-emitted (a rebuild would otherwise drop it).
     convergent: list = []
+    per_carrier_conv: dict[str, int] = {}
     if not demo:
         try:
             from .adapters import CONVERGENT_ADAPTERS
@@ -75,12 +94,37 @@ def run(demo: bool = False, only: str | None = None) -> int:
                     got = cls(settings).fetch(ctarget)
                     valid = [o.stamp(run_ts) for o in got if o.is_valid()]
                     convergent.extend(valid)
+                    per_carrier_conv[ctarget.carrier] = (per_carrier_conv.get(ctarget.carrier, 0)
+                                                         + len(valid))
                     print(f"  convergent {ctarget.carrier}/{ctarget.category}: {len(valid)} offer(s)")
                 except Exception as e:                      # one source failing must not stop the rest
                     print(f"  ! convergent {ctarget.carrier}/{ctarget.category}: "
                           f"{type(e).__name__}: {e} - skipped")
         except Exception as e:      # config/registry-level failure — skip the whole convergent pass
             print(f"  ! convergent pass skipped ({type(e).__name__}: {e})")
+
+    # LIVE SANITY GUARDRAIL (GOVERNANCE §6) — extends the zero-guard from "zero" to "implausible", and
+    # since #37 it judges BOTH domains, so it runs after the convergent pass. If any carrier's count
+    # is outside its band, or any price is absurd, BLOCK: do NOT write/commit (the non-zero EXIT is
+    # what stops the workflow's commit step — no degraded snapshot ever lands) AND send a SANITY email
+    # (guarded: the e-mail is never what crashes the run, and its failure does not un-block anything).
+    # ⚠️ Contrast with the price digest below, which is purely informational and must NEVER block.
+    if not demo:
+        issues = alerts_mod.check_sanity(per_carrier, plans, settings.sanity,
+                                         per_carrier_convergent=per_carrier_conv,
+                                         convergent=convergent)
+        if issues:
+            for i in issues:
+                print(f"SANITY FAIL: [{i.carrier}] {i.kind}: {i.detail}", file=sys.stderr)
+            try:
+                subj, body = alerts_mod.format_sanity_email(issues, run_ts.date().isoformat())
+                sent = alerts_mod.send_alert_email(settings.alerts, subj, body)
+                print(f"alerts: sanity-fail email {'sent' if sent else 'not sent'}", file=sys.stderr)
+            except Exception as e:  # the alert must never be the thing that crashes the run
+                print(f"alerts: sanity-alert error ({type(e).__name__}: {e}) - continuing", file=sys.stderr)
+            print(f"ALERT: sanity check failed ({len(issues)} issue(s)) — NOT committing this snapshot.",
+                  file=sys.stderr)
+            return 4
 
     result = write_workbook(plans, settings.output_xlsx, run_ts, convergent=convergent)
     print(
@@ -107,12 +151,8 @@ def run(demo: bool = False, only: str | None = None) -> int:
         except Exception as e:  # never let alerting break the run
             print(f"alerts: error ({type(e).__name__}: {e}) - continuing")
 
-    # In live mode, a carrier scraping zero is an alert condition (GOVERNANCE §6).
-    if not demo:
-        zero = [c for c in ("vivo", "claro", "tim") if per_carrier.get(c, 0) == 0]
-        if zero:
-            print(f"ALERT: zero plans for {zero} — investigate.", file=sys.stderr)
-            return 3
+    # Note: a carrier scraping zero is now caught by the sanity guard above (0 < min_plans →
+    # count_low → blocked + alerted before the workbook is written).
     return 0
 
 

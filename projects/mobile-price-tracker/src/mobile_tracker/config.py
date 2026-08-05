@@ -45,6 +45,10 @@ class Settings:
     def alerts(self) -> dict:
         return self.raw.get("alerts", {})
 
+    @property
+    def sanity(self) -> dict:
+        return self.raw.get("sanity", {})
+
     def active_states(self) -> list[str]:
         return [s["code"] for s in self.raw.get("states", []) if s.get("active")]
 

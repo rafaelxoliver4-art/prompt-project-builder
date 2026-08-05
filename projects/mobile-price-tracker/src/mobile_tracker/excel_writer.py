@@ -127,7 +127,12 @@ def _merge_history(existing: pd.DataFrame, fresh: pd.DataFrame) -> pd.DataFrame:
         existing = existing[~existing["snapshot_date"].isin(fresh_dates)]
     df = pd.concat([existing, fresh], ignore_index=True)
     df = _with_key(df)
-    df = df.drop_duplicates(subset=["snapshot_date", "carrier", "state", "_key"], keep="last")
+    # `category` IS part of the identity (#37). Without it a plan_id that legitimately appears in two
+    # categories collapses to one row and a REAL observed price is silently lost: Claro's Controle page
+    # yields `claro:plano-flex-20gb` ("Controle 20GB", R$44,90) whose slug also names the Flex-page row,
+    # so only 3 of the 4 Claro Controle plans were being stored (#35 audit).
+    df = df.drop_duplicates(subset=["snapshot_date", "carrier", "state", "category", "_key"],
+                            keep="last")
     df = df.sort_values(["snapshot_date", "carrier", "category", "plan_name"]).reset_index(drop=True)
     # Enforce the canonical schema/order (CONTEXT §6). This matters when merging a history written by
     # OLDER code that lacked a column (e.g. validity_days, #18): pd.concat would otherwise append the
@@ -141,17 +146,35 @@ def _rotation_pairs(cur, old, new_keys, gone_keys) -> dict:
     Drupal nid on 2026-07-06 while cutting Controle prices −15%), which turns real price changes into
     invisible "removed"+"new" pairs. Pair the id-unmatched rows by (carrier, state, category, plan_name)
     — names survive rotations — but ONLY when the name maps 1:1 on both sides (ambiguity → keep the
-    honest new/removed rows). Returns {new_key: old_key}."""
+    honest new/removed rows). Returns {new_key: old_key}.
+
+    ⚠️ TIGHTENED in #37, in lockstep with `alerts.compute_price_moves`. #29 only required the name to
+    be unique among the UNMATCHED rows, so a name that ALSO exists on an id-matched row could still be
+    claimed by the fallback (the #35 audit found 176 non-unique name groups and a false "Vivo Lite
+    R$35 → R$75, +114%"). The name must now be unique in the FULL snapshot on BOTH sides. This helper
+    and the alert matcher MUST stay identical: CONTEXT §3 promises the `changes` sheet and the e-mail
+    agree, and a rule that lived in only one of them would make them contradict each other."""
+    def name_key(r):
+        return (str(r["carrier"]), str(r["state"]), str(r["category"]), str(r["plan_name"]))
+
     def by_name(frame, keys):
         m: dict = {}
         for k in keys:
-            r = frame.loc[k]
-            nk = (str(r["carrier"]), str(r["state"]), str(r["category"]), str(r["plan_name"]))
-            m.setdefault(nk, []).append(k)
+            m.setdefault(name_key(frame.loc[k]), []).append(k)
         return m
+
+    def counts(frame):                       # multiplicity across the WHOLE snapshot, not just leftovers
+        c: dict = {}
+        for _, r in frame.iterrows():
+            k = name_key(r)
+            c[k] = c.get(k, 0) + 1
+        return c
+
     news, olds = by_name(cur, new_keys), by_name(old, gone_keys)
+    cur_names, old_names = counts(cur), counts(old)
     return {ks[0]: olds[nk][0] for nk, ks in news.items()
-            if len(ks) == 1 and len(olds.get(nk, [])) == 1}
+            if len(ks) == 1 and len(olds.get(nk, [])) == 1
+            and cur_names.get(nk, 0) == 1 and old_names.get(nk, 0) == 1}
 
 
 def _merge_convergent(existing: pd.DataFrame, fresh: pd.DataFrame) -> pd.DataFrame:
@@ -225,7 +248,12 @@ def _compute_changes(history: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=cols)
     latest, prev = dates[-1], dates[-2]
     h = _with_key(history)
-    h["_ck"] = h["carrier"].astype(str) + "|" + h["state"].astype(str) + "|" + h["_key"].astype(str)
+    # `category` belongs in the match key for the same reason it belongs in the dedupe key (#37/C):
+    # a native id is only unique WITHIN a category page. Claro's controle page reuses the flex slug,
+    # so `claro:plano-flex-20gb` is a real R$44,90 Controle plan AND a real R$59,90 Flex plan in the
+    # same snapshot — without `category` they collapse into one row and the R$15 gap reads as a move.
+    h["_ck"] = (h["carrier"].astype(str) + "|" + h["state"].astype(str) + "|"
+                + h["category"].astype(str) + "|" + h["_key"].astype(str))
     cur = h[h.snapshot_date == latest].drop_duplicates("_ck").set_index("_ck")
     old = h[h.snapshot_date == prev].drop_duplicates("_ck").set_index("_ck")
 

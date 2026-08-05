@@ -253,15 +253,22 @@ def test_one_convergent_source_failing_does_not_stop_the_others_or_mobile(monkey
                                     offer_id=f"{target.carrier}:1", price_brl=99.0,
                                     has_mobile=True, has_broadband=True)]
 
-    # This test is about the CONVERGENT guard only, so neutralise the (separately developed) live
-    # sanity guardrail — otherwise a stub carrier count outside its configured band would abort the
-    # run for an unrelated reason. `raising=False`: the attribute may not exist in every checkout.
+    # This test is about the CONVERGENT guard only, so neutralise the run-blocking output guard —
+    # otherwise a stub carrier count outside its band aborts the run for an unrelated reason.
+    # `raising=False`: the attribute may not exist in every checkout.
     class _NoSanity:
         @staticmethod
         def check_sanity(*a, **k):
             return []
     monkeypatch.setattr(main_mod, "alerts_mod", _NoSanity, raising=False)
-    monkeypatch.setattr(main_mod, "ADAPTERS", {"tim": _MobileStub})
+    # ⚠️ REGRESSION GUARD (#37): stub ALL THREE carriers and do NOT restrict with `only`. The earlier
+    # version stubbed just `tim`, so vivo/claro collected 0 plans — which the zero-guard in the THEN
+    # COMMITTED main.py turned into exit 3 while this test asserted 0. It passed locally (where a
+    # different output guard was in place) and FAILED IN CI, and because the workflow runs the tests
+    # BEFORE the scrape, that failure cost the 2026-08-04 snapshot entirely. Keep this guard-agnostic:
+    # give every carrier plans so no output guard can fire for an unrelated reason.
+    monkeypatch.setattr(main_mod, "ADAPTERS",
+                        {"tim": _MobileStub, "vivo": _MobileStub, "claro": _MobileStub})
     monkeypatch.setitem(__import__("mobile_tracker.adapters", fromlist=["x"]).CONVERGENT_ADAPTERS,
                         "vivo_total", _Boom)
     monkeypatch.setitem(__import__("mobile_tracker.adapters", fromlist=["x"]).CONVERGENT_ADAPTERS,
@@ -275,7 +282,7 @@ def test_one_convergent_source_failing_does_not_stop_the_others_or_mobile(monkey
                             "path": str(path), "snapshot_date": "d", "plans_in_latest": len(plans),
                             "snapshots_in_history": 1, "changes": 0,
                             "convergent_rows": len(convergent or []), "convergent_snapshots": 1})
-    rc = main_mod.run(demo=False, only="tim")
+    rc = main_mod.run(demo=False)                           # every carrier stubbed — no `only`
     assert rc == 0                                          # the run SUCCEEDS despite vivo blowing up
     assert captured["plans"], "mobile plans must still be written"
     carriers = {o.carrier for o in captured["convergent"]}
@@ -284,12 +291,15 @@ def test_one_convergent_source_failing_does_not_stop_the_others_or_mobile(monkey
 
 
 class _MobileStub:
-    """A network-free mobile adapter so the guard test never touches a carrier site."""
+    """A network-free mobile adapter so the guard test never touches a carrier site. Returns rows for
+    WHICHEVER carrier it is registered under, so no carrier ends the run at zero plans (#37)."""
     def __init__(self, settings): pass
 
     def fetch(self, target):
-        return [Plan(carrier="tim", category=target.category, state=target.state,
-                     plan_name="Stub", plan_id="tim:stub", price_brl=100.0, source_url="x")]
+        return [Plan(carrier=target.carrier, category=target.category, state=target.state,
+                     plan_name=f"Stub {target.carrier} {target.category}",
+                     plan_id=f"{target.carrier}:stub-{target.category}", price_brl=100.0,
+                     source_url="x")]
 
     def demo_plans(self, target):
         return self.fetch(target)

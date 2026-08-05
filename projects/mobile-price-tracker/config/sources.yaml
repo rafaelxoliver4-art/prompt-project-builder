@@ -38,6 +38,27 @@ alerts:
   smtp_host: smtp.gmail.com
   smtp_port: 587
 
+# Live-output sanity guardrail (GOVERNANCE §6): a degraded scrape must ALERT + BLOCK the commit,
+# not silently land junk. Plausibility BANDS per carrier (healthy margin around today's ~14/24/15 so
+# normal drift doesn't false-alarm) + global price bounds to catch absurd parses. Tunable here, no code.
+sanity:
+  fetch_retries: 2            # extra retries on a TRANSIENT network blip (not on a block/CAPTCHA)
+  price_min_brl: 5            # a real plan/recarga is never < R$5
+  # 2000, not 1000: Vivo Total's V 1 Giga combo is genuinely R$1.200/mo (1 Gbps + 600 GB + 10 extra
+  # lines + Vivo TV Completo) — verified repeatedly. A lower cap would band out real data. (#37)
+  price_max_brl: 2000
+  # How stale the newest snapshot may be before the run e-mails a STALE DATA warning. The daily job
+  # only validates data when it RUNS; a job that never runs is otherwise silent (#37/F2).
+  max_snapshot_age_days: 2
+  carriers:                                   # MOBILE plan counts (2026-08-05: claro 20 / tim 19 / vivo 26)
+    claro: { min_plans: 12, max_plans: 32 }
+    vivo:  { min_plans: 16, max_plans: 38 }
+    tim:   { min_plans: 12, max_plans: 30 }
+  convergent:                                 # COMBO offer counts (2026-08-05: TIM 3 / Vivo 11 / Claro 10)
+    tim:   { min_offers: 2,  max_offers: 10 }
+    vivo:  { min_offers: 6,  max_offers: 20 }
+    claro: { min_offers: 5,  max_offers: 20 }
+
 # Geography. SP only is active now; others are pre-listed but inactive.
 states:
   - code: SP

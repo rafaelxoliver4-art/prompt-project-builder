@@ -1,0 +1,57 @@
+name: mobile-price-tracker-watchdog
+
+# "Did the daily job actually run?" — the one failure the tracker itself cannot report.
+#
+# The sanity guardrail only validates data when the scrape RUNS, and the staleness check only fires
+# on a run that happens. A job that dies early — or never fires at all — is completely silent. That
+# is exactly what happened on 2026-08-04: the scheduled run failed in the test step BEFORE scraping,
+# and the day's snapshot was lost with nobody told (#37/F3).
+#
+# This workflow READS the committed workbook and e-mails if today's snapshot_date is absent.
+# It does NOT scrape, does NOT write, and does NOT commit — so it can never interfere with the main
+# job (see the guards below). Schedule: 23:00 UTC == 20:00 BRT, ~2h after the 18:00 BRT scrape.
+
+on:
+  workflow_dispatch:          # manual "is the history current?" check
+  schedule:
+    - cron: "0 23 * * *"      # 23:00 UTC == 20:00 BRT (UTC−3), ~2h after the main job
+
+# READ-ONLY. The main job needs `contents: write` to commit the snapshot; the watchdog must never be
+# able to touch the repo, so it gets the minimum. This is the hard guard against interference.
+permissions:
+  contents: read
+
+# Never queue behind / cancel the scrape: a separate concurrency group from the main workflow, and
+# no cancel-in-progress, so the two can never contend.
+concurrency:
+  group: mobile-price-tracker-watchdog
+  cancel-in-progress: false
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10       # a read + compare + e-mail; anything longer is a hang
+    defaults:
+      run:
+        working-directory: projects/mobile-price-tracker
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # Only what reading one workbook needs — NO playwright/browsers (the watchdog never scrapes).
+      - name: Install (read-only deps)
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas openpyxl pyyaml
+          pip install -e . --no-deps
+
+      - name: Check today's snapshot
+        env:
+          EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
+        # Always exits 0 — the watchdog REPORTS; a red X here would itself be noise, and it has no
+        # data to protect. The e-mail is the signal.
+        run: python -m mobile_tracker.watchdog
