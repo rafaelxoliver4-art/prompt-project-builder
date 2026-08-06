@@ -18,7 +18,8 @@
 | Excel writer | ✅ done (offline) | Works on fixture data; verified by demo run + unit test. |
 | Adapters (vivo/claro/tim) | ✅ all three live | **Claro** (`__NEXT_DATA__`), **Vivo** (Playwright DOM), **TIM** (Drupal `ofertas` JSON) parse real SP plans. |
 | Live scraping | ✅ all sources live | **Mobile** claro 20 + vivo 26 + tim 19 = **65** SP plans; **convergent** tim 3 + vivo 11 + claro 10 = **24** combos (2026-08-05). |
-| Scheduling (GitHub Actions) | ✅ LIVE | Daily **18:00 BRT** (`0 21 * * *`); first real snapshot 2026-06-22. **44/45 days captured** — only 2026-08-04 lost (#37 §F1, unrecoverable). |
+| Scheduling (GitHub Actions) | ✅ LIVE | Daily **18:00 BRT** (`0 21 * * *`); first real snapshot 2026-06-22. **44/45 days captured (98 %)** — the 08-04 and 08-05 runs both died on a stale test (#38); 08-05 was re-scraped in time, **2026-08-04 is the only permanent loss**. |
+| Snapshot dating | ✅ fixed (#38) | `snapshot_date` is the **São Paulo** day (`project.timezone`), not the UTC runner's day — the two agree at 18:00 BRT, so the bug hid for 44 snapshots and only showed on an after-21:00-BRT run. |
 | Unattended-run safety | ✅ done (#37/#38) | **Sanity guardrail blocks** a degraded commit + e-mails; **staleness alert** at run start; **watchdog workflow** 20:00 BRT (date anchored to its scheduled hour, #38); transient-only retry. |
 | CI ≠ data collection | ✅ done (#38) | `tests` and `collect` are **independent jobs** — a red test can no longer stop the scrape (proven live). Bad scrapes still block the commit (also proven). Red tests stay loud: visible failure + `CI TESTS FAILING` e-mail. |
 | Build phase | ✅ CLOSED (#38) | All 🔴 P0 + 🟠 P1 audit findings resolved. Project is in **steady-state operation**; 🟡 P2 list is open + explicitly optional. |
@@ -574,9 +575,10 @@ Both were repaired with the **minimum** targeted re-fetch (3 TIM pages — `cont
 
 **⚠️ Found and fixed in passing — the watchdog's own date.** GitHub cron is best-effort: the 23:00 UTC watchdog actually started at **00:02 UTC**, past midnight, so `date.today()` asked "is there a snapshot for *tomorrow*?" — unanswerable, and it would cry wolf on every slow queue. The workflow now evaluates the UTC date **as of two hours ago** (correct on time, correct for delays up to ~3 h). Re-dispatched to confirm: at 00:44 UTC it evaluated **2026-08-05** and correctly reported that day missing. Workflow-only change; `watchdog.py` already accepted an explicit `today`.
 
-**Current state (2026-08-06).**
+**State as it stood at the end of this task — ⚠️ SUPERSEDED a few hours later by the timezone fix in the next entry. Read that one for the current numbers.**
 - `history` **2 459 rows / 44 snapshots**, 2026-06-22 → 2026-08-06, **coverage 44/46 = 96 %**. `convergent_history` **27 rows / 2 snapshots**, 2026-08-03 → 2026-08-06.
-- **Missing, in both sheets: `2026-08-04` and `2026-08-05`.** No other gap. Both are **unrecoverable and were NOT backfilled**. Genuine 08-05 raw captures do sit in the local, uncommitted `data/raw/` — writing them under an 08-05 date would be recovery from a real archive rather than invention, but it is still backfilling a missing date, which the standing rule forbids. **That call belongs to the Architect, not to Code**; flagging it, not doing it.
+- **Missing, in both sheets: `2026-08-04` and `2026-08-05`.** Both looked unrecoverable and were NOT backfilled; the genuine 08-05 raw captures sitting in the local, uncommitted `data/raw/` were flagged to the Architect rather than used, since writing them under an 08-05 date would still be backfilling a missing date.
+- **What that analysis missed** (found immediately afterwards): the `2026-08-06` snapshot was itself misdated — it was scraped at 21:18 **BRT on 08-05** and only looked like the 6th because the runner stamps UTC. So 08-05 was never a lost day at all; it just needed the right date and a same-day re-scrape. **Final: coverage 44/45 = 98 %, gap = 2026-08-04 alone.**
 - Scheduled runs: 07-30, 07-31, 08-01, 08-02, 08-03 green → **08-04 and 08-05 failed (the stale test)** → fixed. Both workflows `active`.
 - **pytest: 203 passed.**
 - **This closes the build phase.** Steady state: daily scrape 18:00 BRT, watchdog 20:00 BRT, weekly Monday backup. Open and **explicitly optional**: the 🟡 P2 list in `docs/source_audit_2026-08.md` §7 (items 7–9), convergent charts, a R$/GB value lens.
