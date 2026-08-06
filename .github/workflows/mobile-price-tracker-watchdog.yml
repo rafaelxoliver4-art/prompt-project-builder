@@ -54,4 +54,17 @@ jobs:
           EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
         # Always exits 0 — the watchdog REPORTS; a red X here would itself be noise, and it has no
         # data to protect. The e-mail is the signal.
-        run: python -m mobile_tracker.watchdog
+        #
+        # ⚠️ ANCHOR THE DATE TO THE SCHEDULED HOUR, NOT TO `now` (#38). GitHub cron is best-effort:
+        # observed 2026-08-06, this 23:00 UTC job actually started at 00:02 UTC — past midnight, so a
+        # naive `date.today()` asks "is there a snapshot for TOMORROW?" and cries wolf every time the
+        # queue is slow. Evaluating the UTC date as of two hours ago keeps the check on the day the
+        # cron was scheduled for, and stays correct for delays up to ~3 h.
+        run: |
+          python - <<'PY'
+          from datetime import datetime, timedelta, timezone
+          from mobile_tracker import watchdog
+          day = (datetime.now(timezone.utc) - timedelta(hours=2)).date()
+          print(f"watchdog: evaluating {day} (scheduled 23:00 UTC; now {datetime.now(timezone.utc):%H:%M} UTC)")
+          raise SystemExit(watchdog.run(today=day))
+          PY
