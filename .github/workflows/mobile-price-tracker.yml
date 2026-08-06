@@ -3,6 +3,24 @@ name: mobile-price-tracker
 # Daily unattended scrape (runs with your machine off): scrapes Vivo/Claro/TIM, writes the Excel
 # time-series, and commits it back to the repo — this IS the committed, append-only price history.
 # Schedule: 21:00 UTC == 18:00 BRT (UTC−3). Also runnable on demand via the "Run workflow" button.
+#
+# ⚠️ TWO INDEPENDENT JOBS — this structure exists because of a real data loss (#38).
+# On 2026-08-04 the tests ran in the SAME job, BEFORE the scrape. One stale unit test went red and
+# the job died before it ever reached a carrier: that day's prices are gone forever, because carrier
+# pages only show today's price. A red test is a code-quality signal; a missed scrape is permanent
+# data loss. They must not share a failure path.
+#
+# `tests` and `collect` therefore have NO `needs:` between them — they start together and neither can
+# affect the other. (`needs: [tests]` + `if: always()` was rejected: it still makes collection WAIT
+# for the suite, so a hung, queued or cancelled tests job delays or skips the scrape. The whole point
+# is that collection has no dependency on the suite at all.)
+#
+# What still BLOCKS the commit — all of it inside `collect`, untouched:
+#   * zero rows for a carrier / no plans at all  → main.py exits non-zero
+#   * sanity bands or price bounds violated      → main.py exits 4 BEFORE writing the workbook
+#   * mode == demo                               → commit + backup steps skipped (fabricated prices)
+# A bad SCRAPE must never be committed; that is data protection and it stays. Only the TEST GATE is
+# decoupled.
 
 on:
   workflow_dispatch:
@@ -16,11 +34,72 @@ on:
     - cron: "0 21 * * *"   # 21:00 UTC == 18:00 BRT (UTC−3)
 
 permissions:
-  contents: write           # allow committing the updated workbook + weekly backup
+  contents: read           # least privilege by default; only `collect` is granted write (below)
 
 jobs:
-  scrape:
+  # ---------------------------------------------------------------------------------------------
+  # TESTS — visible and loud, but NOT a gate. Its conclusion has no effect on `collect`.
+  # ---------------------------------------------------------------------------------------------
+  tests:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read       # never writes; the workbook is `collect`'s business
+    defaults:
+      run:
+        working-directory: projects/mobile-price-tracker
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # No `playwright install` here — the suite is entirely offline (no test launches a browser),
+      # so the browser download would be ~30s of pure waste on every run.
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e .
+
+      - name: Run tests (offline)
+        run: pytest -q
+
+      # Decoupling must not become silence. The job below still reports FAILURE (so GitHub's own
+      # notifications fire), and this step additionally e-mails, reusing the same secret-based path
+      # as the price digest. `continue-on-error` so a mail problem can't mask the real failure, and
+      # `if: failure()` so it only speaks up when something is actually broken.
+      - name: Alert on failing tests
+        if: failure()
+        continue-on-error: true
+        env:
+          EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python - <<'PY'
+          import os
+          from mobile_tracker import config
+          from mobile_tracker.alerts import send_alert_email
+
+          settings = config.load()
+          subject = "Mobile Price Tracker — CI TESTS FAILING"
+          body = (f"{subject}\n\n"
+                  f"The offline test suite went RED on {os.environ.get('GITHUB_REF_NAME', '?')}.\n\n"
+                  f"Run: {os.environ.get('RUN_URL', '(unknown)')}\n\n"
+                  f"NOTE: since #38 this does NOT stop the daily scrape — the `collect` job runs\n"
+                  f"independently, so today's prices are still being collected and committed.\n"
+                  f"Fix the tests at your convenience; the data is safe.\n")
+          print("alert:", "sent" if send_alert_email(settings.alerts, subject, body) else "not sent")
+          PY
+
+  # ---------------------------------------------------------------------------------------------
+  # COLLECT — the daily scrape + commit. Runs regardless of the test suite's result.
+  # ---------------------------------------------------------------------------------------------
+  collect:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # commits the updated workbook + the weekly backup
     defaults:
       run:
         working-directory: projects/mobile-price-tracker
@@ -39,9 +118,6 @@ jobs:
           pip install -e .                                  # editable install → `python -m` needs NO PYTHONPATH
           python -m playwright install --with-deps chromium # --with-deps: headless Chromium libs (Vivo) on the runner
 
-      - name: Run tests (offline)
-        run: pytest -q
-
       - name: Run tracker (all three carriers)
         env:
           # SMTP password for the ≥3% price-change email alert — from a GitHub Secret, never in code.
@@ -54,8 +130,10 @@ jobs:
           else
             python -m mobile_tracker.main
           fi
-        # NOTE: main.py exits non-zero (alerts) if any carrier yields zero plans — a blocked carrier
-        # fails the job here, so the commit step below is skipped (no fake/partial commit; GOVERNANCE §6).
+        # THE DATA GUARD, and it still blocks: main.py exits 2 (nothing collected) or 4 (sanity bands /
+        # price bounds violated, checked BEFORE the workbook is written). A non-zero exit fails this
+        # step, and the steps below carry no status function in their `if:` — GitHub implicitly ANDs
+        # `success()` in — so the commit is skipped. No degraded snapshot ever lands (GOVERNANCE §6).
 
       # ⚠️ NEVER commit a demo run. `--demo` writes the adapters' HARDCODED SAMPLE prices to the same
       # workbook path, and every output guard is skipped in demo mode — so a `mode: demo` dispatch

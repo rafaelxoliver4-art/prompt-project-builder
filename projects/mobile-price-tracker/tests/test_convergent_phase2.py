@@ -253,20 +253,28 @@ def test_one_convergent_source_failing_does_not_stop_the_others_or_mobile(monkey
                                     offer_id=f"{target.carrier}:1", price_brl=99.0,
                                     has_mobile=True, has_broadband=True)]
 
-    # This test is about the CONVERGENT guard only, so neutralise the run-blocking output guard —
-    # otherwise a stub carrier count outside its band aborts the run for an unrelated reason.
-    # `raising=False`: the attribute may not exist in every checkout.
-    class _NoSanity:
-        @staticmethod
-        def check_sanity(*a, **k):
-            return []
-    monkeypatch.setattr(main_mod, "alerts_mod", _NoSanity, raising=False)
+    # ⚠️ ISOLATION, rewritten in #38. This test is about the CONVERGENT guard ONLY, so every other
+    # part of main.run() has to be neutralised — and neutralised HONESTLY, against the guards main.py
+    # actually has today. The previous version swapped the whole `alerts_mod` for a stub class that
+    # defined only `check_sanity`, so main.py's `check_staleness` call raised AttributeError into a
+    # try/except and the test passed by ACCIDENT; worse, the run reached the closing price digest,
+    # which re-imports the REAL alerts module (`from . import alerts as _alerts`) and therefore read
+    # the REAL committed workbook and entered the REAL SMTP path.
+    # Patching the FUNCTIONS on the real module fixes both: the late re-import sees the same stubs,
+    # nothing touches data/mobile_plans.xlsx, and no mail is ever attempted.
+    import mobile_tracker.alerts as alerts_module
+    monkeypatch.setattr(alerts_module, "check_sanity", lambda *a, **k: [])
+    monkeypatch.setattr(alerts_module, "check_staleness", lambda *a, **k: None)
+    monkeypatch.setattr(alerts_module, "alerts_from_workbook", lambda *a, **k: ([], None))
+    monkeypatch.setattr(alerts_module, "send_alert_email",
+                        lambda *a, **k: pytest.fail("no e-mail may be attempted in the suite"))
     # ⚠️ REGRESSION GUARD (#37): stub ALL THREE carriers and do NOT restrict with `only`. The earlier
     # version stubbed just `tim`, so vivo/claro collected 0 plans — which the zero-guard in the THEN
     # COMMITTED main.py turned into exit 3 while this test asserted 0. It passed locally (where a
-    # different output guard was in place) and FAILED IN CI, and because the workflow runs the tests
-    # BEFORE the scrape, that failure cost the 2026-08-04 snapshot entirely. Keep this guard-agnostic:
-    # give every carrier plans so no output guard can fire for an unrelated reason.
+    # different output guard was in place) and FAILED IN CI. At the time the workflow ran the tests
+    # BEFORE the scrape in the same job, so that red test cost the 2026-08-04 snapshot permanently.
+    # (Since #38 the suite no longer gates collection — but keep this guard-agnostic anyway: give
+    # every carrier plans so no output guard can fire for an unrelated reason.)
     monkeypatch.setattr(main_mod, "ADAPTERS",
                         {"tim": _MobileStub, "vivo": _MobileStub, "claro": _MobileStub})
     monkeypatch.setitem(__import__("mobile_tracker.adapters", fromlist=["x"]).CONVERGENT_ADAPTERS,
