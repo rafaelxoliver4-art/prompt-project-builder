@@ -49,6 +49,13 @@ class Settings:
     def sanity(self) -> dict:
         return self.raw.get("sanity", {})
 
+    @property
+    def timezone(self) -> str:
+        """The project's operating timezone — the one a `snapshot_date` is expressed in. This is a
+        Brazilian price tracker, so a snapshot belongs to the São Paulo calendar day, NOT to the
+        runner's UTC day (CI runs on a UTC machine)."""
+        return self.raw.get("project", {}).get("timezone") or "America/Sao_Paulo"
+
     def active_states(self) -> list[str]:
         return [s["code"] for s in self.raw.get("states", []) if s.get("active")]
 

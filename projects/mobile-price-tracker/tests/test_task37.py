@@ -520,6 +520,36 @@ def test_watchdog_email_failure_is_not_fatal(tmp_path, monkeypatch):
     assert watchdog.run(today=date(2026, 8, 5)) == 0
 
 
+def test_snapshot_date_is_the_sao_paulo_day_not_the_runners_utc_day(monkeypatch):
+    """#38 follow-up. These are Brazilian prices, so a snapshot belongs to the São Paulo calendar
+    day. CI runs on a UTC machine and the 21:00 UTC cron (18:00 BRT) lands on the same date in both
+    zones — which hid this for 44 snapshots. A manual run at 21:18 BRT on 2026-08-05 was 00:18 UTC on
+    the 6th, and got filed as `2026-08-06`: tomorrow's date, on prices that were already gone by
+    then."""
+    import mobile_tracker.main as main_mod
+
+    class _S:
+        timezone = "America/Sao_Paulo"
+
+    ts = main_mod.project_now(_S())
+    assert ts.tzinfo is None, "snapshot_ts must stay naive — every stored row uses that format"
+    # BRT is UTC-3 year-round (Brazil dropped DST in 2019)
+    from datetime import timezone as _tz
+    delta = (datetime.now(_tz.utc).replace(tzinfo=None) - ts).total_seconds()
+    assert 3 * 3600 - 120 < delta < 3 * 3600 + 120, f"expected ~UTC-3, got {delta/3600:.2f}h"
+
+
+def test_project_now_falls_back_instead_of_failing_the_scrape(capsys):
+    """A clock detail must never be the reason a day's prices are lost."""
+    import mobile_tracker.main as main_mod
+
+    class _Bad:
+        timezone = "Mars/Olympus_Mons"
+
+    ts = main_mod.project_now(_Bad())
+    assert ts.tzinfo is None and abs((datetime.now() - ts).total_seconds()) < 5
+
+
 class _FakeSettings:
     """Minimal stand-in for Settings — the watchdog only needs the workbook path and alert config."""
     def __init__(self, path):

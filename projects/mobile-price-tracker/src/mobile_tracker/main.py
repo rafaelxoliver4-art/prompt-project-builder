@@ -24,9 +24,30 @@ from .excel_writer import write_workbook
 from .models import Plan
 
 
+def project_now(settings) -> datetime:
+    """`datetime.now()` in the PROJECT's timezone (config `project.timezone`), not the runner's.
+
+    A snapshot_date must be the SÃO PAULO calendar day — these are Brazilian prices. CI runs on a UTC
+    machine, and the daily cron (21:00 UTC == 18:00 BRT) happens to land on the same date in both
+    zones, which hid this for 44 snapshots. A manual run after 21:00 BRT is past midnight UTC, and
+    2026-08-05's evening scrape was filed as `2026-08-06` — tomorrow's date, for prices that no
+    longer existed by then.
+
+    Returned NAIVE (tzinfo stripped) so `snapshot_ts` keeps the exact format every stored row uses;
+    the value is the local wall clock, which is what the column has always meant. An unknown/missing
+    tz name falls back to the old behaviour rather than failing the run."""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo(settings.timezone)).replace(tzinfo=None)
+    except Exception as e:      # bad tz name, missing tzdata — never let a clock detail stop a scrape
+        print(f"config: timezone '{getattr(settings, 'timezone', '?')}' unusable "
+              f"({type(e).__name__}) - falling back to the local clock", file=sys.stderr)
+        return datetime.now()
+
+
 def run(demo: bool = False, only: str | None = None) -> int:
     settings = config.load()
-    run_ts = datetime.now()
+    run_ts = project_now(settings)
     targets = [t for t in settings.targets() if (only is None or t.carrier == only)]
 
     # STALENESS CHECK (#37/F2) — the gap the sanity guardrail cannot cover: sanity only validates data
