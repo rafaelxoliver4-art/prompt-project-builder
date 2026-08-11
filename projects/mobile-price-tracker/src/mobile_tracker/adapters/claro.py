@@ -54,6 +54,17 @@ def _claro_slug(modal: dict) -> str | None:
     return re.sub(r"-mais$", "", s, flags=re.I)
 
 
+# Claro's own slug declares the product LINE: "plano-controle-25gb" -> control, "plano-flex-20gb" ->
+# flex, "plano-pos-60gb" -> postpaid. Anything not listed is left alone rather than filtered out.
+_SLUG_LINE = {"controle": "control", "flex": "flex", "pos": "postpaid"}
+
+
+def slug_line(slug: str | None) -> str | None:
+    """The product line Claro's native slug declares, or None when it doesn't say."""
+    m = re.match(r"plano-([a-z]+)-", slug or "", re.I)
+    return _SLUG_LINE.get(m.group(1).lower()) if m else None
+
+
 def _parse_brl(text: str | None) -> float | None:
     if not text:
         return None
@@ -112,6 +123,20 @@ def parse_next_data(data: dict, target: Target, raw_ref: str | None = None) -> l
             modal = link[0].get("modalContent", {}) if link and isinstance(link[0], dict) else {}
             modal = modal or {}
             slug = _claro_slug(modal)               # native, unique (e.g. "plano-controle-30gb-gaming")
+
+            # ⚠️ CROSS-SELL GUARD (#39). A card's `category` and `plan_name` are inherited from the
+            # PAGE we are reading, but its product line is declared by Claro's own slug — and the
+            # controle page cross-sells a FLEX plan (`plano-flex-20gb`, R$44,90 here vs R$59,90 on
+            # the flex page itself). Inheriting the page turned that into a "Controle 20GB" row that
+            # UNDERCUT every real Controle plan, so the Control column reported a Flex price and the
+            # same R$44,90 was counted twice across Control and Digital. Trust the slug, not the page.
+            # The line's own page stays authoritative, so the plan is still tracked — just once.
+            line = slug_line(slug)
+            if line and line != target.category:
+                print(f"  claro/{target.category}: skipping cross-sell card '{slug}' "
+                      f"(R$ {price:g}) - it is a {line.upper()} plan, tracked on its own page")
+                continue
+
             title = _clean(modal.get("title"))
             if title and _GB.search(title):         # explicit plan name, e.g. "Pós 100GB"
                 name = title

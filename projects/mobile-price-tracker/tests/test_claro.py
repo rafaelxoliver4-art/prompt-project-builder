@@ -146,3 +146,39 @@ def test_prepaid_collision_keeps_cheaper():
 def test_postpaid_has_no_validity():
     # regression: validity is PREPAID-only — postpaid plans (parse_next_data) keep validity_days None.
     assert all(p.validity_days is None for p in _plans())
+
+
+def test_cross_sell_card_is_not_claimed_by_the_page_it_sits_on():
+    """#39. Claro's controle page cross-sells a FLEX plan (`plano-flex-20gb`, R$44,90 there vs
+    R$59,90 on the flex page). `category` and `plan_name` are inherited from the page being read, so
+    that card became a "Controle 20GB" row at R$44,90 — undercutting every real Controle plan, and
+    making the SAME R$44,90 drive both the Control and the Digital matrix columns. The product line
+    is declared by Claro's own slug; trust that, not the page."""
+    from mobile_tracker.adapters.claro import parse_next_data, slug_line
+
+    assert slug_line("plano-flex-20gb") == "flex"
+    assert slug_line("plano-controle-25gb") == "control"
+    assert slug_line("plano-pos-60gb") == "postpaid"
+    assert slug_line("prezao-30d-12gb") is None          # unknown shape -> never filtered
+
+    def card(accordion_slug, price):
+        return {"actions": [{"price": {"price": price},
+                             "link": [{"modalContent": {
+                                 "title": "Mais detalhes",
+                                 "drawer_select_list": [{"accordion_list_relations": {
+                                     "name": accordion_slug}}]}}]}]}
+
+    data = {"props": {"pageProps": {"dynamicComponents": {"body": [{
+        "component": "card_360",
+        "data": {"data": [card("lista-accordion-card-360-plano-controle-25gb-mais-informacoes", "59,90"),
+                          card("lista-accordion-card-360-plano-flex-20gb-mais-informacoes", "44,90")]}}]}}}}
+    t = Target(carrier="claro", render="nextjs", category="control", category_label="Controle",
+               state="SP", url="https://www.claro.com.br/celular/controle")
+    plans = parse_next_data(data, t)
+    assert [p.plan_id for p in plans] == ["claro:plano-controle-25gb"]   # the flex card is dropped
+    assert min(p.price_brl for p in plans) == 59.90                      # a Flex price can't win Control
+
+    # ...and the flex page still keeps its own plan, so nothing is lost overall
+    tf = Target(carrier="claro", render="nextjs", category="flex", category_label="Flex",
+                state="SP", url="https://www.claro.com.br/celular/flex")
+    assert [p.plan_id for p in parse_next_data(data, tf)] == ["claro:plano-flex-20gb"]
