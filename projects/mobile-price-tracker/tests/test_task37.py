@@ -567,3 +567,105 @@ def test_alerts_still_degrade_gracefully_without_a_password(monkeypatch):
     assert alerts.send_alert_email(cfg, "s", "b") is False
     assert format_alert_email([Alert("tim", "control", "A", "tim:1", 1.0, 2.0, 100.0)],
                               "2026-08-05", 3.0)[0]
+
+
+# --------------------------------------------------------------------------------------------
+# #40 — a carrier that REFUSES us must not cost the carriers that answered
+# --------------------------------------------------------------------------------------------
+def test_a_refused_carrier_does_not_block_the_ones_that_answered():
+    """THE 2026-08-18 LOSS. TIM 403'd the GitHub runner, `tim: 0` tripped count_low, and Claro's 19
+    + Vivo's 26 perfectly good plans were discarded with it — the day is unrecoverable. A carrier
+    that never answered is a GAP; only a carrier that answered with junk is degraded data."""
+    cfg = {"price_min_brl": 5, "price_max_brl": 2000,
+           "carriers": {"claro": {"min_plans": 12, "max_plans": 32},
+                        "vivo": {"min_plans": 16, "max_plans": 38},
+                        "tim": {"min_plans": 12, "max_plans": 30}}}
+    counts = {"claro": 19, "vivo": 26, "tim": 0}
+    assert [i.kind for i in check_sanity(counts, [], cfg)] == ["count_low"]      # old behaviour
+    assert check_sanity(counts, [], cfg, unavailable={"tim"}) == []              # #40: gap, not junk
+
+
+def test_a_carrier_that_answered_with_junk_still_blocks():
+    """The guardrail must not be weakened: 3 plans from a REACHABLE carrier means our parser or
+    their page broke, and that must still stop the commit."""
+    cfg = {"carriers": {"tim": {"min_plans": 12, "max_plans": 30}}}
+    issues = check_sanity({"tim": 3}, [], cfg, unavailable=set())
+    assert [i.kind for i in issues] == ["count_low"]
+
+
+def test_unavailable_email_names_the_carrier_and_the_gap():
+    subject, body = alerts.format_unavailable_email(
+        ["tim"], ["tim/control/SP: RuntimeError: 403 Forbidden"], "2026-08-18")
+    assert "CARRIER UNAVAILABLE" in subject and "TIM" in subject
+    assert "403" in body and "never carried forward" in body
+
+
+def test_catch_up_does_nothing_when_the_day_is_complete(tmp_path):
+    """Politeness: the second daily pass must not re-scrape a source that already answered."""
+    from mobile_tracker.main import snapshot_gaps
+    out = tmp_path / "wb.xlsx"
+    write_workbook(_stamp([P("tim", "control", "A", "tim:1", 50.0),
+                           P("claro", "control", "B", "claro:1", 60.0),
+                           P("vivo", "control", "C", "vivo:1", 70.0)], "2026-08-19"),
+                   out, datetime(2026, 8, 19, 18))
+    assert snapshot_gaps(out, "2026-08-19", {"tim", "claro", "vivo"}) == set()
+
+
+def test_catch_up_targets_only_the_missing_carrier(tmp_path):
+    from mobile_tracker.main import snapshot_gaps
+    out = tmp_path / "wb.xlsx"
+    write_workbook(_stamp([P("claro", "control", "B", "claro:1", 60.0),
+                           P("vivo", "control", "C", "vivo:1", 70.0)], "2026-08-18"),
+                   out, datetime(2026, 8, 18, 18))
+    assert snapshot_gaps(out, "2026-08-18", {"tim", "claro", "vivo"}) == {"tim"}
+    # a workbook we cannot read must not be mistaken for "all good"
+    assert snapshot_gaps(tmp_path / "nope.xlsx", "2026-08-18", {"tim"}) == {"tim"}
+
+
+def test_2026_08_18_replayed_end_to_end_now_commits(monkeypatch):
+    """The whole point of #40, end to end through main.run(): TIM refuses every request (403), Claro
+    and Vivo answer normally. Before: exit 4, nothing written, the day lost. After: the snapshot is
+    written with the two carriers that answered, exit 0 so the workflow commits it."""
+    import mobile_tracker.main as main_mod
+
+    calls = {"written": None, "emails": []}
+
+    class _Blocked:
+        def __init__(self, settings): pass
+        def fetch(self, target):
+            raise RuntimeError("Client error '403 Forbidden' for url "
+                               f"'https://www.tim.com.br/sp/...{target.category}'")
+
+    class _Healthy:
+        def __init__(self, settings): pass
+        def fetch(self, target):
+            n = {"claro": 5, "vivo": 7}[target.carrier]      # x4 categories -> 20 / 28, inside bands
+            return [P(target.carrier, target.category, f"{target.carrier} {i}",
+                      f"{target.carrier}:{target.category}:{i}", 50.0 + i) for i in range(n)]
+
+    class _NoOffers:
+        def __init__(self, settings): pass
+        def fetch(self, target): return []
+
+    monkeypatch.setattr(main_mod, "ADAPTERS",
+                        {"tim": _Blocked, "claro": _Healthy, "vivo": _Healthy})
+    registry = __import__("mobile_tracker.adapters", fromlist=["x"]).CONVERGENT_ADAPTERS
+    for name in list(registry):
+        monkeypatch.setitem(registry, name, _NoOffers)
+    monkeypatch.setattr(alerts, "check_staleness", lambda *a, **k: None)
+    monkeypatch.setattr(alerts, "send_alert_email",
+                        lambda cfg, s, b: calls["emails"].append(s) or True)
+    monkeypatch.setattr(main_mod, "write_workbook",
+                        lambda plans, path, ts, convergent=None: calls.__setitem__("written", plans)
+                        or {"path": str(path), "snapshot_date": "d", "plans_in_latest": len(plans),
+                            "snapshots_in_history": 1, "changes": 0,
+                            "convergent_rows": 0, "convergent_snapshots": 0})
+
+    rc = main_mod.run(demo=False)
+
+    assert rc == 0, "a refused carrier must not fail the run"
+    assert calls["written"], "the carriers that answered must still be written"
+    carriers = {p.carrier for p in calls["written"]}
+    assert carriers == {"claro", "vivo"}          # TIM absent — an honest gap, not invented
+    assert any("CARRIER UNAVAILABLE" in s for s in calls["emails"])
+    assert not any("SANITY" in s for s in calls["emails"]), "this is a gap, not degraded data"

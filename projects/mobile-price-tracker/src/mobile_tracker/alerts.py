@@ -26,9 +26,14 @@ class SanityIssue:
     carrier: str
     kind: str          # "count_low" | "count_high" | "price_out_of_range"
     detail: str
+    # Which domain the issue belongs to. Load-bearing (#40): a MOBILE issue blocks the commit, a
+    # CONVERGENT one must not — CONTEXT §14 promises a combo problem can never cost the mobile
+    # snapshot, and #37 accidentally broke that by letting convergent bands hit the same exit path.
+    domain: str = "mobile"
 
 
-def _band_issues(counts: dict, bands: dict, lo_key: str, hi_key: str, unit: str) -> list[SanityIssue]:
+def _band_issues(counts: dict, bands: dict, lo_key: str, hi_key: str, unit: str,
+                 domain: str = "mobile") -> list[SanityIssue]:
     """Count-band check shared by the mobile and convergent domains (#37)."""
     out: list[SanityIssue] = []
     for carrier, count in (counts or {}).items():
@@ -37,27 +42,39 @@ def _band_issues(counts: dict, bands: dict, lo_key: str, hi_key: str, unit: str)
             continue
         lo, hi = band.get(lo_key), band.get(hi_key)
         if lo is not None and count < lo:
-            out.append(SanityIssue(carrier, "count_low", f"{count} {unit} (< min {lo})"))
+            out.append(SanityIssue(carrier, "count_low", f"{count} {unit} (< min {lo})", domain))
         elif hi is not None and count > hi:
-            out.append(SanityIssue(carrier, "count_high", f"{count} {unit} (> max {hi})"))
+            out.append(SanityIssue(carrier, "count_high", f"{count} {unit} (> max {hi})", domain))
     return out
 
 
 def check_sanity(per_carrier: dict, plans, cfg: dict,
-                 per_carrier_convergent: dict | None = None, convergent=None) -> list[SanityIssue]:
+                 per_carrier_convergent: dict | None = None, convergent=None,
+                 unavailable=None) -> list[SanityIssue]:
     """Pure: flag a degraded scrape (GOVERNANCE §6). A carrier whose valid-row count falls outside its
     band, or any row priced outside [price_min_brl, price_max_brl], is an issue. Only carriers actually
     scraped (present in the count dicts) are checked, so a partial run is judged on what it attempted.
     Empty list = all sane. Extended in #37 to cover the CONVERGENT domain as well as mobile.
 
     An issue BLOCKS the commit (main.py exits non-zero) — unlike a price alert, which is purely
-    informational and must never block."""
+    informational and must never block.
+
+    ⚠️ `unavailable` (#40) names carriers that REFUSED us outright — every target raised (403,
+    CAPTCHA, DNS, timeout), so we hold no data for them. Those are EXCLUDED from the count bands,
+    because a band exists to catch a carrier that *answered with junk*, not one that never answered.
+    Conflating the two cost the whole 2026-08-18 snapshot: TIM 403'd the GitHub runner, `tim: 0`
+    tripped `count_low`, and Claro's 19 + Vivo's 26 perfectly good plans were thrown away with it.
+    A missing carrier is reported by its own CARRIER UNAVAILABLE alert and left as an honest gap —
+    never carried forward, never invented."""
+    skip = set(unavailable or ())
+    per_carrier = {c: n for c, n in (per_carrier or {}).items() if c not in skip}
     issues = _band_issues(per_carrier, cfg.get("carriers", {}), "min_plans", "max_plans", "plans")
     issues += _band_issues(per_carrier_convergent, cfg.get("convergent", {}),
-                           "min_offers", "max_offers", "combo offers")
+                           "min_offers", "max_offers", "combo offers", domain="convergent")
 
     pmin, pmax = cfg.get("price_min_brl"), cfg.get("price_max_brl")
     if pmin is not None or pmax is not None:
+        mobile_ids = {id(r) for r in (plans or [])}
         for row in list(plans or []) + list(convergent or []):
             price = _num(getattr(row, "price_brl", None))
             if price is None:
@@ -65,8 +82,10 @@ def check_sanity(per_carrier: dict, plans, cfg: dict,
             if (pmin is not None and price < pmin) or (pmax is not None and price > pmax):
                 name = getattr(row, "plan_name", None) or getattr(row, "offer_name", "?")
                 rid = getattr(row, "plan_id", None) or getattr(row, "offer_id", "?")
-                issues.append(SanityIssue(getattr(row, "carrier", "?"), "price_out_of_range",
-                                          f"{name} ({rid}): R$ {price} outside [{pmin}, {pmax}]"))
+                issues.append(SanityIssue(
+                    getattr(row, "carrier", "?"), "price_out_of_range",
+                    f"{name} ({rid}): R$ {price} outside [{pmin}, {pmax}]",
+                    "mobile" if id(row) in mobile_ids else "convergent"))
     return issues
 
 
@@ -118,6 +137,23 @@ def format_staleness_email(message: str, date):
     return subject, (f"{subject}\n\nThe tracker's history has not advanced as expected:\n\n"
                      f"  {message}\n\nThe daily job may have failed or never fired — check the "
                      f"GitHub Actions run history.\n")
+
+
+def format_unavailable_email(carriers, errors, date):
+    """A carrier refused us entirely (#40). Distinct from SANITY CHECK FAILED: the snapshot IS
+    committed for the carriers that answered, and this names what is missing so the gap is visible
+    rather than silently absorbed."""
+    names = ", ".join(c.upper() for c in carriers) or "none"
+    subject = f"Mobile Price Tracker — CARRIER UNAVAILABLE ({names}) — {date}"
+    lines = [e for e in (errors or []) if any(str(c) in str(e) for c in carriers)][:12]
+    body = (f"{subject}\n\nThese carriers refused every request this run, so the {date} snapshot has "
+            f"NO rows for them:\n\n  {names}\n\nThe run still committed the carriers that did answer "
+            f"— their prices are real and worth keeping. The missing carrier is an honest gap: it is "
+            f"never carried forward from yesterday and never estimated.\n\n"
+            f"A 403/CAPTCHA is a refusal, not a network blip, so it is NOT retried inside the run "
+            f"(GOVERNANCE §3). If it repeats for several days the source needs re-checking.\n\n"
+            f"Errors:\n" + ("\n".join(f"  {e}" for e in lines) or "  (none captured)") + "\n")
+    return subject, body
 
 
 def format_sanity_email(issues: list[SanityIssue], date):

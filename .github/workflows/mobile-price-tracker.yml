@@ -31,7 +31,12 @@ on:
         default: live
         options: [live, demo]
   schedule:
-    - cron: "0 21 * * *"   # 21:00 UTC == 18:00 BRT (UTC−3)
+    - cron: "0 21 * * *"   # 21:00 UTC == 18:00 BRT (UTC−3) — the main daily pass
+    # CATCH-UP (#40): 3h later. Scrapes ONLY carriers missing from today's snapshot and exits
+    # immediately when the day is already complete, so a healthy day costs nothing extra and no
+    # source is ever hit twice. Exists because on 2026-08-18 TIM 403'd the runner and the whole
+    # day was lost; a second chance at a different hour would very likely have saved it.
+    - cron: "0 0 * * *"    # 00:00 UTC == 21:00 BRT (still the same São Paulo day)
 
 permissions:
   contents: read           # least privilege by default; only `collect` is granted write (below)
@@ -125,10 +130,17 @@ jobs:
           EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
         run: |
           MODE="${{ github.event.inputs.mode || 'live' }}"
+          # The 00:00 UTC schedule is the catch-up pass (#40): it only scrapes carriers missing from
+          # today's snapshot, and no-ops when the day is already complete.
+          CATCHUP=""
+          if [ "${{ github.event.schedule }}" = "0 0 * * *" ]; then
+            CATCHUP="--only-if-incomplete"
+            echo "catch-up schedule detected — will scrape only what is missing today"
+          fi
           if [ "$MODE" = "demo" ]; then
             python -m mobile_tracker.main --demo
           else
-            python -m mobile_tracker.main
+            python -m mobile_tracker.main $CATCHUP
           fi
         # THE DATA GUARD, and it still blocks: main.py exits 2 (nothing collected) or 4 (sanity bands /
         # price bounds violated, checked BEFORE the workbook is written). A non-zero exit fails this

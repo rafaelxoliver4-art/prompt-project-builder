@@ -45,10 +45,40 @@ def project_now(settings) -> datetime:
         return datetime.now()
 
 
-def run(demo: bool = False, only: str | None = None) -> int:
+def snapshot_gaps(path, day: str, carriers) -> set[str]:
+    """Which of `carriers` have NO rows for `day` in the stored history (#40).
+
+    Used by --only-if-incomplete so the catch-up run can tell "today is already complete" (do
+    nothing — never scrape a source twice in a day) from "a carrier is missing" (worth one retry).
+    A missing/unreadable workbook means every carrier is missing, which is the safe answer."""
+    import pandas as pd
+    try:
+        df = pd.read_excel(path, sheet_name="history", dtype={"snapshot_date": str})
+    except Exception:
+        return set(carriers)
+    today = df[df["snapshot_date"].astype(str).str[:10] == str(day)]
+    have = set(today["carrier"].dropna().astype(str)) if len(today) else set()
+    return {c for c in carriers if c not in have}
+
+
+def run(demo: bool = False, only: str | None = None, only_if_incomplete: bool = False) -> int:
     settings = config.load()
     run_ts = project_now(settings)
     targets = [t for t in settings.targets() if (only is None or t.carrier == only)]
+
+    # CATCH-UP MODE (#40). A second scheduled pass exists purely to rescue a day that the main run
+    # left incomplete — e.g. 2026-08-18, when TIM 403'd the runner. It scrapes ONLY when something is
+    # actually missing, so a healthy day costs zero extra requests and the one-pass-a-day politeness
+    # rule still holds for every source that already answered.
+    if only_if_incomplete and not demo:
+        wanted = {t.carrier for t in targets}
+        missing = snapshot_gaps(settings.output_xlsx, run_ts.date().isoformat(), wanted)
+        if not missing:
+            print(f"catch-up: {run_ts.date().isoformat()} already has all carriers "
+                  f"({', '.join(sorted(wanted))}) - nothing to do, not scraping.")
+            return 0
+        print(f"catch-up: {run_ts.date().isoformat()} is missing {sorted(missing)} - retrying those.")
+        targets = [t for t in targets if t.carrier in missing]
 
     # STALENESS CHECK (#37/F2) — the gap the sanity guardrail cannot cover: sanity only validates data
     # when the job RUNS, so a job that fails or never fires is completely silent. (On 2026-08-04 the
@@ -70,24 +100,37 @@ def run(demo: bool = False, only: str | None = None) -> int:
     plans: list[Plan] = []
     per_carrier: dict[str, int] = {}
     errors: list[str] = []
+    # Per carrier: how many targets we attempted, and how many of those FAILED to fetch at all.
+    # This is what separates "the carrier refused us" from "the carrier answered with junk" (#40).
+    attempted: dict[str, int] = {}
+    fetch_failed: dict[str, int] = {}
 
     for t in targets:
         adapter = ADAPTERS[t.carrier](settings)
+        attempted[t.carrier] = attempted.get(t.carrier, 0) + 1
         try:
             got = adapter.demo_plans(t) if demo else adapter.fetch(t)
         except NotImplementedError as e:
             errors.append(f"{t.carrier}/{t.category}/{t.state}: not implemented ({e})")
+            fetch_failed[t.carrier] = fetch_failed.get(t.carrier, 0) + 1
             got = []
         except Exception as e:  # keep going; one target failing shouldn't abort the run
             errors.append(f"{t.carrier}/{t.category}/{t.state}: {type(e).__name__}: {e}")
+            fetch_failed[t.carrier] = fetch_failed.get(t.carrier, 0) + 1
             got = []
         valid = [p.stamp(run_ts) for p in got if p.is_valid()]
         plans.extend(valid)
         per_carrier[t.carrier] = per_carrier.get(t.carrier, 0) + len(valid)
 
+    # UNAVAILABLE (not degraded): every target we tried for this carrier failed to fetch, so we have
+    # NO data from it — as opposed to a carrier that answered and produced an implausible count,
+    # which is a parser/site problem and must still block. See check_sanity(unavailable=...).
+    unavailable = {c for c in attempted
+                   if per_carrier.get(c, 0) == 0 and fetch_failed.get(c, 0) == attempted[c]}
+
     print(f"Collected {len(plans)} valid plans across {len(targets)} targets.")
     for c, n in sorted(per_carrier.items()):
-        print(f"  {c}: {n}")
+        print(f"  {c}: {n}{'  [UNAVAILABLE - all targets refused/failed]' if c in unavailable else ''}")
     for e in errors:
         print(f"  ! {e}")
 
@@ -130,10 +173,49 @@ def run(demo: bool = False, only: str | None = None) -> int:
     # what stops the workflow's commit step — no degraded snapshot ever lands) AND send a SANITY email
     # (guarded: the e-mail is never what crashes the run, and its failure does not un-block anything).
     # ⚠️ Contrast with the price digest below, which is purely informational and must NEVER block.
+    # A carrier that REFUSED us (403/CAPTCHA/network) contributes no data, and #40 stops that from
+    # costing the carriers that DID answer. It is reported loudly and separately — never silently.
+    # Mobile only. A convergent source failing is already logged-and-skipped by design and must never
+    # escalate (CONTEXT §14) — it cannot cost the day, so it does not belong in this alert.
+    if not demo and unavailable:
+        names = ", ".join(sorted(unavailable))
+        print(f"CARRIER UNAVAILABLE: mobile=[{names}] — committing the carriers that DID answer; "
+              f"the missing ones are a recorded gap, never carried forward or invented.",
+              file=sys.stderr)
+        try:
+            subj, body = alerts_mod.format_unavailable_email(sorted(unavailable), errors,
+                                                            run_ts.date().isoformat())
+            sent = alerts_mod.send_alert_email(settings.alerts, subj, body)
+            print(f"alerts: carrier-unavailable email {'sent' if sent else 'not sent'}", file=sys.stderr)
+        except Exception as e:
+            print(f"alerts: unavailable-alert error ({type(e).__name__}: {e}) - continuing",
+                  file=sys.stderr)
+
     if not demo:
         issues = alerts_mod.check_sanity(per_carrier, plans, settings.sanity,
                                          per_carrier_convergent=per_carrier_conv,
-                                         convergent=convergent)
+                                         convergent=convergent,
+                                         unavailable=unavailable)
+        # #40: split by domain. A CONVERGENT anomaly must never cost the mobile snapshot (CONTEXT
+        # §14) — we drop this run's combo rows instead, which PRESERVES the stored convergent
+        # history (write_workbook re-emits it when passed an empty list) and lets mobile commit.
+        conv_issues = [i for i in issues if getattr(i, "domain", "mobile") == "convergent"]
+        issues = [i for i in issues if getattr(i, "domain", "mobile") != "convergent"]
+        if conv_issues:
+            for i in conv_issues:
+                print(f"SANITY (convergent, NOT blocking): [{i.carrier}] {i.kind}: {i.detail}",
+                      file=sys.stderr)
+            print(f"convergent: dropping this run's {len(convergent)} offer(s) — the stored "
+                  f"convergent history is preserved and mobile still commits.", file=sys.stderr)
+            convergent = []
+            try:
+                subj, body = alerts_mod.format_sanity_email(conv_issues, run_ts.date().isoformat())
+                alerts_mod.send_alert_email(settings.alerts, subj.replace("SANITY CHECK FAILED",
+                                                                          "CONVERGENT DATA SKIPPED"),
+                                            body)
+            except Exception as e:
+                print(f"alerts: convergent-sanity alert error ({type(e).__name__}) - continuing",
+                      file=sys.stderr)
         if issues:
             for i in issues:
                 print(f"SANITY FAIL: [{i.carrier}] {i.kind}: {i.detail}", file=sys.stderr)
@@ -181,8 +263,11 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Brazil mobile plan price tracker")
     ap.add_argument("--demo", action="store_true", help="offline run using sample data")
     ap.add_argument("--only", help="restrict to one carrier (vivo|claro|tim)")
+    ap.add_argument("--only-if-incomplete", action="store_true",
+                    help="catch-up pass: scrape ONLY the carriers missing from today's snapshot, "
+                         "and do nothing at all if today is already complete (#40)")
     args = ap.parse_args()
-    sys.exit(run(demo=args.demo, only=args.only))
+    sys.exit(run(demo=args.demo, only=args.only, only_if_incomplete=args.only_if_incomplete))
 
 
 if __name__ == "__main__":
