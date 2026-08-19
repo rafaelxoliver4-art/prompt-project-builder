@@ -47,6 +47,14 @@ on:
     - cron: "0  1 * * *"   # 01:00 UTC == 22:00 BRT (same SP day) — catch-up 2
     - cron: "30 2 * * *"   # 02:30 UTC == 23:30 BRT (same SP day) — last call before midnight BRT
 
+# Four passes a day (#41) must never overlap. A run caps at 25 min and the passes are 2 h apart, so
+# overlap needs a >2 h GitHub queue delay — rare, but it would be nasty: the second pass would read a
+# workbook the first has not committed yet, conclude the day is empty, and re-scrape every source.
+# Queue instead of cancel: a pass that is merely late is still worth running.
+concurrency:
+  group: mobile-price-tracker-collect
+  cancel-in-progress: false
+
 permissions:
   contents: read           # least privilege by default; only `collect` is granted write (below)
 
@@ -204,7 +212,18 @@ jobs:
             echo "No changes to commit."
           else
             git commit -m "chore(data): daily snapshot $(date -u +%F)"
-            git push
+            # ⚠️ A FAILED PUSH IS A LOST DAY: the commit lives only on this runner, which is then
+            # destroyed. Anything landing on main since checkout (a code push, the backup step)
+            # rejects a plain push. Rebase and retry; if it still fails the job goes red on purpose,
+            # and the later catch-up passes will see the day incomplete and collect it again.
+            pushed=""
+            for attempt in 1 2 3; do
+              if git push; then pushed=yes; break; fi
+              echo "push rejected (attempt $attempt) - rebasing onto origin/${GITHUB_REF_NAME}"
+              git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || break
+              sleep 5
+            done
+            [ -n "$pushed" ] || { echo "::error::could not push today's snapshot"; exit 1; }
           fi
 
       - name: Weekly backup (Mondays, UTC)
