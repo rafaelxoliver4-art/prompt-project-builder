@@ -61,6 +61,47 @@ def snapshot_gaps(path, day: str, carriers) -> set[str]:
     return {c for c in carriers if c not in have}
 
 
+def convergent_gaps(path, day: str, carriers) -> set:
+    """Which combo carriers have NO rows for `day` in `convergent_history` (#41). The convergent
+    twin of snapshot_gaps, so a catch-up pass re-scrapes only the combo sources that are actually
+    missing. A missing/unreadable sheet means all of them, which is the safe answer."""
+    import pandas as pd
+    try:
+        df = pd.read_excel(path, sheet_name="convergent_history", dtype={"snapshot_date": str})
+    except Exception:
+        return set(carriers)
+    today = df[df["snapshot_date"].astype(str).str[:10] == str(day)]
+    have = set(today["carrier"].dropna().astype(str)) if len(today) else set()
+    return {c for c in carriers if c not in have}
+
+
+def stored_offers_for(path, day: str) -> list:
+    """Today's already-stored CONVERGENT rows as ConvergentOffer objects (#41).
+
+    Same trap as stored_plans_for: `_merge_convergent` is idempotent per snapshot_date, so a
+    catch-up that scraped only the missing combo source would DELETE the combo rows the earlier
+    pass collected. Re-submit what the day already holds."""
+    import dataclasses
+    import pandas as pd
+    from .convergent import CONVERGENT_COLUMNS, ConvergentOffer
+    fields = {f.name for f in dataclasses.fields(ConvergentOffer)}
+    try:
+        df = pd.read_excel(path, sheet_name="convergent_history",
+                           dtype={"snapshot_date": str, "snapshot_ts": str})
+    except Exception:
+        return []
+    today = df[df["snapshot_date"].astype(str).str[:10] == str(day)]
+    out = []
+    for r in today.itertuples(index=False):
+        kw = {c: getattr(r, c) for c in CONVERGENT_COLUMNS
+              if c in fields and c not in ("snapshot_date", "snapshot_ts")
+              and pd.notna(getattr(r, c, None))}
+        o = ConvergentOffer(**kw)
+        o.snapshot_date, o.snapshot_ts = str(r.snapshot_date), str(r.snapshot_ts)
+        out.append(o)
+    return out
+
+
 def stored_plans_for(path, day: str) -> list:
     """Today's ALREADY-STORED rows, rebuilt as Plan objects (#41).
 
@@ -161,6 +202,12 @@ def run(demo: bool = False, only: str | None = None, only_if_incomplete: bool = 
         print(f"  ! {e}")
 
     if not plans:
+        if only_if_incomplete:
+            # The retry found the missing carrier still refusing. Nothing is wrong: the day keeps
+            # whatever the earlier pass committed, and CARRIER UNAVAILABLE already reported the gap.
+            # Exiting non-zero here would paint the run red three times a night for no new fact.
+            print("catch-up: the missing carrier(s) are still unavailable — leaving today as it is.")
+            return 0
         print("No plans collected — aborting write so history is not wiped.", file=sys.stderr)
         return 2
 
@@ -172,10 +219,20 @@ def run(demo: bool = False, only: str | None = None, only_if_incomplete: bool = 
     # sheet is always re-read and re-emitted (a rebuild would otherwise drop it).
     convergent: list = []
     per_carrier_conv: dict[str, int] = {}
+    # ⚠️ A catch-up must skip the combo sources that ALREADY answered today. Without this the three
+    # extra passes re-scrape every convergent source nightly — 4 hits a day instead of 1, breaking
+    # the politeness rule the catch-up design depends on (GOVERNANCE §3).
+    conv_wanted: set | None = None
+    if only_if_incomplete and not demo:
+        conv_wanted = convergent_gaps(settings.output_xlsx, run_ts.date().isoformat(),
+                                      {c.carrier for c, _ in settings.convergent_targets()})
+        print(f"catch-up: convergent still missing today: {sorted(conv_wanted) or 'nothing'}")
     if not demo:
         try:
             from .adapters import CONVERGENT_ADAPTERS
             for ctarget, adapter_name in settings.convergent_targets():
+                if conv_wanted is not None and ctarget.carrier not in conv_wanted:
+                    continue                      # already collected today — do not scrape twice
                 cls = CONVERGENT_ADAPTERS.get(adapter_name)
                 if cls is None:
                     print(f"  ! convergent {ctarget.carrier}: unknown adapter '{adapter_name}' - skipped")
@@ -265,6 +322,16 @@ def run(demo: bool = False, only: str | None = None, only_if_incomplete: bool = 
             print(f"catch-up: carrying {len(keep)} row(s) already collected today for "
                   f"{sorted({p.carrier for p in keep})} into the merged snapshot.")
             plans = keep + plans
+        # Same for combos — but ONLY when this pass actually collected some, because passing an
+        # empty list is the documented way to PRESERVE the stored convergent history untouched.
+        if convergent:
+            have = stored_offers_for(settings.output_xlsx, run_ts.date().isoformat())
+            fresh_conv = {o.carrier for o in convergent}
+            keep_conv = [o for o in have if o.carrier not in fresh_conv]
+            if keep_conv:
+                print(f"catch-up: carrying {len(keep_conv)} combo row(s) already collected today "
+                      f"for {sorted({o.carrier for o in keep_conv})}.")
+                convergent = keep_conv + convergent
 
     result = write_workbook(plans, settings.output_xlsx, run_ts, convergent=convergent)
     print(

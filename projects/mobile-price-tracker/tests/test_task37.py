@@ -728,3 +728,103 @@ def test_catch_up_rescues_a_partial_day_into_the_same_date(tmp_path, monkeypatch
     assert set(day.carrier) == {"claro", "vivo", "tim"}, "the day must end complete"
     assert set(hist.snapshot_date) == {"2026-08-19"}, "the rescue must not create a second date"
     assert main_mod.snapshot_gaps(out, "2026-08-19", {"tim", "claro", "vivo"}) == set()
+
+
+def _catchup_env(monkeypatch, out, mobile_adapters, conv_adapters, when):
+    """Wire main.run() for a catch-up pass against `out`, with the given adapters."""
+    import mobile_tracker.main as main_mod
+    monkeypatch.setattr(main_mod, "ADAPTERS", mobile_adapters)
+    registry = __import__("mobile_tracker.adapters", fromlist=["x"]).CONVERGENT_ADAPTERS
+    for name in list(registry):
+        monkeypatch.setitem(registry, name, conv_adapters.get(name, type(
+            "_N", (), {"__init__": lambda s, x: None, "fetch": lambda s, t: []})))
+    monkeypatch.setattr(alerts, "check_staleness", lambda *a, **k: None)
+    monkeypatch.setattr(alerts, "send_alert_email", lambda *a, **k: True)
+    monkeypatch.setattr(alerts, "check_sanity", lambda *a, **k: [])
+    monkeypatch.setattr(main_mod, "project_now", lambda s: when)
+    from mobile_tracker.config import Settings
+    monkeypatch.setattr(Settings, "output_xlsx", property(lambda self: str(out)))
+    return main_mod
+
+
+def test_catch_up_does_not_wipe_todays_combo_rows(tmp_path, monkeypatch):
+    """The convergent twin of the merge trap. `_merge_convergent` also replaces a date's rows, so a
+    catch-up that re-scraped only the missing combo source would delete the ones already collected
+    today."""
+    out = tmp_path / "wb.xlsx"
+    write_workbook(_stamp([P("claro", "control", "C", "claro:1", 60.0)], "2026-08-19"),
+                   out, datetime(2026, 8, 19, 18),
+                   convergent=_stamp([O("vivo", "V Total", "vivo:t1", 160.0),
+                                      O("claro", "Multi", "claro:m1", 129.8)], "2026-08-19"))
+
+    class _Tim:
+        def __init__(self, settings): pass
+        def fetch(self, target):
+            return [P("tim", target.category, "T", f"tim:{target.category}", 45.0)]
+
+    class _TimConv:
+        def __init__(self, settings): pass
+        def fetch(self, target):
+            return [O("tim", "Ultracombo", "tim:u1", 89.99)]
+
+    main_mod = _catchup_env(monkeypatch, out, {"tim": _Tim, "claro": _Tim, "vivo": _Tim},
+                            {"tim_ultracombo": _TimConv}, datetime(2026, 8, 19, 22))
+    assert main_mod.run(demo=False, only_if_incomplete=True) == 0
+
+    conv = pd.read_excel(out, sheet_name="convergent_history", dtype={"snapshot_date": str})
+    day = conv[conv.snapshot_date == "2026-08-19"]
+    assert set(day.carrier) == {"vivo", "claro", "tim"}, "existing combo rows must survive the rescue"
+
+
+def test_catch_up_does_not_rescrape_combo_sources_that_already_answered(tmp_path, monkeypatch):
+    """Politeness: with all three combo sources already collected today, a catch-up must not touch
+    them — otherwise the three extra nightly passes mean 4 scrapes a day per source."""
+    out = tmp_path / "wb.xlsx"
+    write_workbook(_stamp([P("claro", "control", "C", "claro:1", 60.0)], "2026-08-19"),
+                   out, datetime(2026, 8, 19, 18),
+                   convergent=_stamp([O("vivo", "V", "vivo:1", 160.0),
+                                      O("claro", "C", "claro:1", 129.8),
+                                      O("tim", "T", "tim:1", 89.99)], "2026-08-19"))
+
+    class _Mobile:
+        def __init__(self, settings): pass
+        def fetch(self, target):
+            return [P("tim", target.category, "T", f"tim:{target.category}", 45.0)]
+
+    # NOTE: raising here would prove nothing — the convergent loop catches every per-source
+    # exception by design (§14), so an AssertionError would be swallowed and logged and the test
+    # would pass even with the guard removed. Record the calls instead. (Found by mutation testing.)
+    touched = []
+
+    class _Recorder:
+        def __init__(self, settings): pass
+        def fetch(self, target):
+            touched.append(target.carrier)
+            return []
+
+    main_mod = _catchup_env(monkeypatch, out, {"tim": _Mobile, "claro": _Mobile, "vivo": _Mobile},
+                            {n: _Recorder for n in ("tim_ultracombo", "vivo_total", "claro_multi")},
+                            datetime(2026, 8, 19, 22))
+    assert main_mod.run(demo=False, only_if_incomplete=True) == 0
+    assert touched == [], f"combo sources already collected today were re-scraped: {touched}"
+
+
+def test_catch_up_is_not_a_failure_when_the_carrier_is_still_blocked(tmp_path, monkeypatch):
+    """A retry that finds the carrier still refusing must exit 0 — the day keeps what it has, and a
+    red X three times a night would be noise, not information."""
+    out = tmp_path / "wb.xlsx"
+    write_workbook(_stamp([P("claro", "control", "C", "claro:1", 60.0),
+                           P("vivo", "control", "V", "vivo:1", 70.0)], "2026-08-19"),
+                   out, datetime(2026, 8, 19, 18))
+
+    class _StillBlocked:
+        def __init__(self, settings): pass
+        def fetch(self, target):
+            raise RuntimeError("Client error '403 Forbidden' for url '...'")
+
+    main_mod = _catchup_env(monkeypatch, out,
+                            {"tim": _StillBlocked, "claro": _StillBlocked, "vivo": _StillBlocked},
+                            {}, datetime(2026, 8, 19, 23, 30))
+    assert main_mod.run(demo=False, only_if_incomplete=True) == 0
+    hist = pd.read_excel(out, sheet_name="history", dtype={"snapshot_date": str})
+    assert set(hist[hist.snapshot_date == "2026-08-19"].carrier) == {"claro", "vivo"}
