@@ -9,12 +9,16 @@ name: mobile-price-tracker-watchdog
 #
 # This workflow READS the committed workbook and e-mails if today's snapshot_date is absent.
 # It does NOT scrape, does NOT write, and does NOT commit — so it can never interfere with the main
-# job (see the guards below). Schedule: 23:00 UTC == 20:00 BRT, ~2h after the 18:00 BRT scrape.
+# job (see the guards below). Schedule: 03:30 UTC == 00:30 BRT — just after the Sao Paulo day
+# closes, so all four of the day's collection passes (#41) have had their chance first.
 
 on:
   workflow_dispatch:          # manual "is the history current?" check
   schedule:
-    - cron: "0 23 * * *"      # 23:00 UTC == 20:00 BRT (UTC−3), ~2h after the main job
+    # AFTER the last catch-up pass (#41). The tracker now gets four chances across the São Paulo
+    # day, the final one at 23:30 BRT; asking "did today get a snapshot?" before those have run
+    # would cry wolf. 03:30 UTC == 00:30 BRT, i.e. just after the SP day closes.
+    - cron: "30 3 * * *"
 
 # READ-ONLY. The main job needs `contents: write` to commit the snapshot; the watchdog must never be
 # able to touch the repo, so it gets the minimum. This is the hard guard against interference.
@@ -55,16 +59,20 @@ jobs:
         # Always exits 0 — the watchdog REPORTS; a red X here would itself be noise, and it has no
         # data to protect. The e-mail is the signal.
         #
-        # ⚠️ ANCHOR THE DATE TO THE SCHEDULED HOUR, NOT TO `now` (#38). GitHub cron is best-effort:
-        # observed 2026-08-06, this 23:00 UTC job actually started at 00:02 UTC — past midnight, so a
-        # naive `date.today()` asks "is there a snapshot for TOMORROW?" and cries wolf every time the
-        # queue is slow. Evaluating the UTC date as of two hours ago keeps the check on the day the
-        # cron was scheduled for, and stays correct for delays up to ~3 h.
+        # ⚠️ ANCHOR THE DATE, do not use `now` (#38). GitHub cron is best-effort — this job has been
+        # observed starting an hour-plus late — so subtracting 2h keeps the check on the day the cron
+        # was scheduled for even when the queue is slow. Since #38 snapshot_date is the SAO PAULO
+        # day, so the anchor is computed in that timezone, not UTC.
         run: |
           python - <<'PY'
           from datetime import datetime, timedelta, timezone
+          from zoneinfo import ZoneInfo
           from mobile_tracker import watchdog
-          day = (datetime.now(timezone.utc) - timedelta(hours=2)).date()
-          print(f"watchdog: evaluating {day} (scheduled 23:00 UTC; now {datetime.now(timezone.utc):%H:%M} UTC)")
+          # Judge the SAO PAULO day, because that is what snapshot_date means since #38 — not the
+          # runner's UTC day. This job fires at 00:30 BRT, so the day being judged is YESTERDAY in
+          # Sao Paulo: the one whose four collection passes have just finished.
+          sp = datetime.now(ZoneInfo("America/Sao_Paulo"))
+          day = (sp - timedelta(hours=2)).date()
+          print(f"watchdog: evaluating Sao Paulo day {day} (now {sp:%Y-%m-%d %H:%M} BRT)")
           raise SystemExit(watchdog.run(today=day))
           PY

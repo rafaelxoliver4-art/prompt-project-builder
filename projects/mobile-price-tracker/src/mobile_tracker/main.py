@@ -61,6 +61,32 @@ def snapshot_gaps(path, day: str, carriers) -> set[str]:
     return {c for c in carriers if c not in have}
 
 
+def stored_plans_for(path, day: str) -> list:
+    """Today's ALREADY-STORED rows, rebuilt as Plan objects (#41).
+
+    ⚠️ Load-bearing for the catch-up pass. `_merge_history` is idempotent per snapshot_date: writing
+    a date REPLACES every row that date already had. So a supplementary pass that scraped only the
+    missing carrier would DELETE the carriers the earlier pass collected — turning the rescue into a
+    second data loss. (Caught by test, not by review.) The catch-up therefore re-submits today's
+    existing rows alongside the new ones. This is not carrying data forward from another day: these
+    rows were collected today, for today."""
+    import pandas as pd
+    from .models import COLUMNS
+    try:
+        df = pd.read_excel(path, sheet_name="history", dtype={"snapshot_date": str, "snapshot_ts": str})
+    except Exception:
+        return []
+    today = df[df["snapshot_date"].astype(str).str[:10] == str(day)]
+    out = []
+    for r in today.itertuples(index=False):
+        kw = {c: getattr(r, c) for c in COLUMNS
+              if c not in ("snapshot_date", "snapshot_ts") and pd.notna(getattr(r, c, None))}
+        p = Plan(**kw)
+        p.snapshot_date, p.snapshot_ts = str(r.snapshot_date), str(r.snapshot_ts)
+        out.append(p)
+    return out
+
+
 def run(demo: bool = False, only: str | None = None, only_if_incomplete: bool = False) -> int:
     settings = config.load()
     run_ts = project_now(settings)
@@ -228,6 +254,17 @@ def run(demo: bool = False, only: str | None = None, only_if_incomplete: bool = 
             print(f"ALERT: sanity check failed ({len(issues)} issue(s)) — NOT committing this snapshot.",
                   file=sys.stderr)
             return 4
+
+    # CATCH-UP MERGE (#41): re-submit the rows this day already has, or writing the date would
+    # replace them with only what this pass scraped. See stored_plans_for().
+    if only_if_incomplete and not demo:
+        already = stored_plans_for(settings.output_xlsx, run_ts.date().isoformat())
+        if already:
+            fresh_carriers = {p.carrier for p in plans}
+            keep = [p for p in already if p.carrier not in fresh_carriers]
+            print(f"catch-up: carrying {len(keep)} row(s) already collected today for "
+                  f"{sorted({p.carrier for p in keep})} into the merged snapshot.")
+            plans = keep + plans
 
     result = write_workbook(plans, settings.output_xlsx, run_ts, convergent=convergent)
     print(

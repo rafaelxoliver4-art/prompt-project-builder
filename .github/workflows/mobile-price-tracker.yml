@@ -31,12 +31,21 @@ on:
         default: live
         options: [live, demo]
   schedule:
-    - cron: "0 21 * * *"   # 21:00 UTC == 18:00 BRT (UTC−3) — the main daily pass
-    # CATCH-UP (#40): 3h later. Scrapes ONLY carriers missing from today's snapshot and exits
-    # immediately when the day is already complete, so a healthy day costs nothing extra and no
-    # source is ever hit twice. Exists because on 2026-08-18 TIM 403'd the runner and the whole
-    # day was lost; a second chance at a different hour would very likely have saved it.
-    - cron: "0 0 * * *"    # 00:00 UTC == 21:00 BRT (still the same São Paulo day)
+    # FOUR CHANCES A DAY, all inside the same São Paulo calendar day (#41).
+    #
+    # We lost three days to three different causes — a red unit test (08-04), a 6-hour dependency
+    # hang (08-15), a carrier 403 (08-18) — and patched each cause after the fact. The structural
+    # problem was never the individual causes: it was that a day had exactly ONE chance, so ANY
+    # fault, including ones we have not met yet, cost the whole day. The fix is redundancy.
+    #
+    # Every pass after the first runs --only-if-incomplete: it reads today's snapshot, scrapes ONLY
+    # the carriers missing from it, and exits doing nothing when the day is already complete. So a
+    # healthy day still makes exactly one pass per source (GOVERNANCE §3 politeness is intact) and
+    # the extra crons cost ~20 seconds of runner time each.
+    - cron: "0 21 * * *"   # 21:00 UTC == 18:00 BRT — the main pass
+    - cron: "0 23 * * *"   # 23:00 UTC == 20:00 BRT — catch-up 1
+    - cron: "0  1 * * *"   # 01:00 UTC == 22:00 BRT (same SP day) — catch-up 2
+    - cron: "30 2 * * *"   # 02:30 UTC == 23:30 BRT (same SP day) — last call before midnight BRT
 
 permissions:
   contents: read           # least privilege by default; only `collect` is granted write (below)
@@ -47,6 +56,7 @@ jobs:
   # ---------------------------------------------------------------------------------------------
   tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 15         # offline suite is ~1 min; longer means something is stuck
     permissions:
       contents: read       # never writes; the workbook is `collect`'s business
     defaults:
@@ -103,6 +113,12 @@ jobs:
   # ---------------------------------------------------------------------------------------------
   collect:
     runs-on: ubuntu-latest
+    # ⚠️ FAIL FAST (#41). A scrape takes ~3 min. Without this the job inherits GitHub's 6-HOUR
+    # default: on 2026-08-15 `playwright install --with-deps` stalled on an Ubuntu apt mirror and
+    # burned the entire window before being killed, so the day was lost AND ~360 private-repo
+    # Actions minutes went with it. Dying at 25 min instead leaves the later catch-up passes time
+    # to rescue the day.
+    timeout-minutes: 25
     permissions:
       contents: write       # commits the updated workbook + the weekly backup
     defaults:
@@ -116,12 +132,36 @@ jobs:
           python-version: "3.11"
           cache: pip
 
+      # Cache the browser so the usual run does no download at all — less network, less to stall.
+      - name: Cache Playwright browser
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-v1
+
       - name: Install dependencies
+        # ⚠️ BOUND + RETRY (#41). This exact step hung for 6 hours on 2026-08-15: `--with-deps` runs
+        # apt-get, an Ubuntu mirror stalled mid-fetch, and nothing timed out. Each attempt is now
+        # capped by `timeout` and retried twice — an apt/network stall is transient, and unlike a
+        # carrier 403 there is no politeness reason not to retry a package mirror.
+        timeout-minutes: 12
         run: |
+          set -e
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install -e .                                  # editable install → `python -m` needs NO PYTHONPATH
-          python -m playwright install --with-deps chromium # --with-deps: headless Chromium libs (Vivo) on the runner
+          for attempt in 1 2 3; do
+            echo "playwright install attempt $attempt"
+            if timeout 240 python -m playwright install --with-deps chromium; then
+              echo "playwright ready"; exit 0
+            fi
+            echo "attempt $attempt stalled or failed; retrying in 15s"
+            sleep 15
+          done
+          # Last resort: the browser alone, without the apt step that is what actually hangs. Vivo
+          # needs it; Claro and TIM are pure HTTP, so a partial day still beats no day at all.
+          echo "falling back to browser-only install (no --with-deps)"
+          timeout 240 python -m playwright install chromium
 
       - name: Run tracker (all three carriers)
         env:
@@ -130,12 +170,14 @@ jobs:
           EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
         run: |
           MODE="${{ github.event.inputs.mode || 'live' }}"
-          # The 00:00 UTC schedule is the catch-up pass (#40): it only scrapes carriers missing from
-          # today's snapshot, and no-ops when the day is already complete.
+          # Every scheduled pass EXCEPT the 21:00 UTC main one is a catch-up (#41): scrape only the
+          # carriers missing from today's snapshot, and do nothing at all if the day is complete.
+          # Inverted deliberately — adding a cron must not require remembering to edit this too.
+          SCHED="${{ github.event.schedule }}"
           CATCHUP=""
-          if [ "${{ github.event.schedule }}" = "0 0 * * *" ]; then
+          if [ -n "$SCHED" ] && [ "$SCHED" != "0 21 * * *" ]; then
             CATCHUP="--only-if-incomplete"
-            echo "catch-up schedule detected — will scrape only what is missing today"
+            echo "catch-up pass ($SCHED) — will scrape only what is missing from today"
           fi
           if [ "$MODE" = "demo" ]; then
             python -m mobile_tracker.main --demo

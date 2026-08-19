@@ -669,3 +669,62 @@ def test_2026_08_18_replayed_end_to_end_now_commits(monkeypatch):
     assert carriers == {"claro", "vivo"}          # TIM absent — an honest gap, not invented
     assert any("CARRIER UNAVAILABLE" in s for s in calls["emails"])
     assert not any("SANITY" in s for s in calls["emails"]), "this is a gap, not degraded data"
+
+
+def test_catch_up_rescues_a_partial_day_into_the_same_date(tmp_path, monkeypatch):
+    """#41 end to end: the 18:00 pass loses TIM to a 403 and commits claro+vivo. A later pass the
+    same São Paulo evening finds TIM missing, scrapes ONLY TIM, and its rows land on the SAME
+    snapshot_date — the day ends complete instead of permanently short a carrier."""
+    import mobile_tracker.main as main_mod
+    out = tmp_path / "wb.xlsx"
+
+    # 18:00 pass: TIM refused, the others committed (the #40 behaviour)
+    write_workbook(_stamp([P("claro", "control", "C", "claro:1", 60.0),
+                           P("vivo", "control", "V", "vivo:1", 70.0)], "2026-08-19"),
+                   out, datetime(2026, 8, 19, 18))
+    assert main_mod.snapshot_gaps(out, "2026-08-19", {"tim", "claro", "vivo"}) == {"tim"}
+
+    # 22:00 BRT catch-up: TIM answers this time
+    class _Tim:
+        def __init__(self, settings): pass
+        def fetch(self, target):
+            return [P("tim", target.category, f"T{i}", f"tim:{target.category}:{i}", 40.0 + i)
+                    for i in range(5)]
+
+    class _NeverCalled:
+        def __init__(self, settings): pass
+        def fetch(self, target):
+            raise AssertionError("a carrier already present today must NOT be scraped again")
+
+    monkeypatch.setattr(main_mod, "ADAPTERS",
+                        {"tim": _Tim, "claro": _NeverCalled, "vivo": _NeverCalled})
+    registry = __import__("mobile_tracker.adapters", fromlist=["x"]).CONVERGENT_ADAPTERS
+    for name in list(registry):
+        monkeypatch.setitem(registry, name, type("_N", (), {"__init__": lambda s, x: None,
+                                                            "fetch": lambda s, t: []}))
+    monkeypatch.setattr(alerts, "check_staleness", lambda *a, **k: None)
+    monkeypatch.setattr(alerts, "send_alert_email", lambda *a, **k: True)
+    monkeypatch.setattr(alerts, "check_sanity", lambda *a, **k: [])      # bands are not the subject
+    monkeypatch.setattr(main_mod, "project_now",
+                        lambda s: datetime(2026, 8, 19, 22, 0))          # 22:00 BRT, same SP day
+
+    class _S:
+        pass
+    real_load = main_mod.config.load
+
+    def _load():
+        s = real_load()
+        s.raw["project"] = dict(s.raw.get("project", {}), output_xlsx=str(out))
+        object.__setattr__(s, "_out", str(out))
+        return s
+    monkeypatch.setattr(main_mod.config, "load", _load)
+    monkeypatch.setattr(type(real_load()), "output_xlsx", property(lambda self: str(out)))
+
+    rc = main_mod.run(demo=False, only_if_incomplete=True)
+    assert rc == 0
+
+    hist = pd.read_excel(out, sheet_name="history", dtype={"snapshot_date": str})
+    day = hist[hist.snapshot_date == "2026-08-19"]
+    assert set(day.carrier) == {"claro", "vivo", "tim"}, "the day must end complete"
+    assert set(hist.snapshot_date) == {"2026-08-19"}, "the rescue must not create a second date"
+    assert main_mod.snapshot_gaps(out, "2026-08-19", {"tim", "claro", "vivo"}) == set()
