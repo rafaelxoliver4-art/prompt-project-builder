@@ -310,15 +310,26 @@ def send_alert_email(cfg: dict, subject: str, body: str) -> bool:
     if not password:
         print("alerts: no password configured (EMAIL_APP_PASSWORD) - skipping send")
         return False
+    # Addresses come from the ENVIRONMENT first, config second (#42). A personal e-mail address is
+    # PII, and this repo is shareable — nobody's inbox should be hard-coded in a tracked file. In
+    # production ALERT_FROM / ALERT_TO are GitHub Actions *variables* (not secrets: they are not
+    # sensitive, just personal), sitting alongside the EMAIL_APP_PASSWORD secret. The config keys
+    # remain supported so a local checkout can still be configured by editing one file.
+    sender = (os.environ.get("ALERT_FROM") or cfg.get("from_email") or "").strip()
+    recipient = (os.environ.get("ALERT_TO") or cfg.get("to_email") or "").strip()
+    if not sender or not recipient or "example.com" in f"{sender}{recipient}":
+        print("alerts: sender/recipient not configured (set ALERT_FROM / ALERT_TO, or the "
+              "alerts block in config/sources.yaml) - skipping send")
+        return False
     try:
         msg = EmailMessage()
         msg["Subject"] = subject
-        msg["From"] = cfg["from_email"]
-        msg["To"] = cfg["to_email"]
+        msg["From"] = sender
+        msg["To"] = recipient
         msg.set_content(body)
         with smtplib.SMTP(cfg["smtp_host"], int(cfg["smtp_port"]), timeout=30) as smtp:
             smtp.starttls()
-            smtp.login(cfg["from_email"], password)       # password used here only; never logged
+            smtp.login(sender, password)                  # password used here only; never logged
             smtp.send_message(msg)
         return True
     except Exception as e:                                  # noqa: BLE001 - must not break the job

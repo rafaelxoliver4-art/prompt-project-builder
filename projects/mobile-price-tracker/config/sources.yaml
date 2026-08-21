@@ -33,8 +33,11 @@ prepaid:
 alerts:
   enabled: true
   threshold_pct: 3.0
-  from_email: ibotatom@gmail.com
-  to_email: rafaelxoliver4@gmail.com
+  # Left blank on purpose: a personal inbox is PII and this repo is shareable.
+  # Production reads the ALERT_FROM / ALERT_TO GitHub Actions *variables* instead.
+  # For a local checkout you may put your own addresses here.
+  from_email: ""
+  to_email: ""
   smtp_host: smtp.gmail.com
   smtp_port: 587
 
