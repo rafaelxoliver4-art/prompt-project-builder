@@ -56,9 +56,12 @@ jobs:
       - name: Check today's snapshot
         env:
           EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
-          # Personal addresses live as repo VARIABLES, never in a tracked file (#42)
-          ALERT_FROM: ${{ vars.ALERT_FROM }}
-          ALERT_TO: ${{ vars.ALERT_TO }}
+          # Personal addresses: repo SECRETS, not variables (#42). Not because they are
+          # confidential, but because GitHub prints an `env:` block in every run log and
+          # masks ONLY secrets — variables would appear verbatim, and in a public repo
+          # those logs are world-readable.
+          ALERT_FROM: ${{ secrets.ALERT_FROM }}
+          ALERT_TO: ${{ secrets.ALERT_TO }}
         # Always exits 0 — the watchdog REPORTS; a red X here would itself be noise, and it has no
         # data to protect. The e-mail is the signal.
         #

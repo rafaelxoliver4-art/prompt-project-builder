@@ -98,9 +98,12 @@ jobs:
         continue-on-error: true
         env:
           EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
-          # Personal addresses live as repo VARIABLES, never in a tracked file (#42)
-          ALERT_FROM: ${{ vars.ALERT_FROM }}
-          ALERT_TO: ${{ vars.ALERT_TO }}
+          # Personal addresses: repo SECRETS, not variables (#42). Not because they are
+          # confidential, but because GitHub prints an `env:` block in every run log and
+          # masks ONLY secrets — variables would appear verbatim, and in a public repo
+          # those logs are world-readable.
+          ALERT_FROM: ${{ secrets.ALERT_FROM }}
+          ALERT_TO: ${{ secrets.ALERT_TO }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           python - <<'PY'
@@ -179,9 +182,12 @@ jobs:
           # SMTP password for the ≥3% price-change email alert — from a GitHub Secret, never in code.
           # If the secret is unset, the alert step skips gracefully (the scrape/commit still run).
           EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
-          # Personal addresses live as repo VARIABLES, never in a tracked file (#42)
-          ALERT_FROM: ${{ vars.ALERT_FROM }}
-          ALERT_TO: ${{ vars.ALERT_TO }}
+          # Personal addresses: repo SECRETS, not variables (#42). Not because they are
+          # confidential, but because GitHub prints an `env:` block in every run log and
+          # masks ONLY secrets — variables would appear verbatim, and in a public repo
+          # those logs are world-readable.
+          ALERT_FROM: ${{ secrets.ALERT_FROM }}
+          ALERT_TO: ${{ secrets.ALERT_TO }}
         run: |
           MODE="${{ github.event.inputs.mode || 'live' }}"
           # Every scheduled pass EXCEPT the 21:00 UTC main one is a catch-up (#41): scrape only the
